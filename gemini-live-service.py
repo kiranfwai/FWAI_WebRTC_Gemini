@@ -325,8 +325,12 @@ async def create_gemini_session(websocket, call_id: str, caller_name: str):
         ])
         log(f"[{call_id}] Pipeline created (same structure as working implementation)")
 
-        # 5. Create task and runner (SAME as working implementation)
-        task = PipelineTask(pipeline, params=PipelineParams(allow_interruptions=True))
+        # 5. Create task and runner (with heartbeats enabled to prevent idle timeout)
+        task = PipelineTask(pipeline, params=PipelineParams(
+            allow_interruptions=True,
+            enable_heartbeats=True,
+            heartbeats_period_secs=5.0
+        ))
         runner = PipelineRunner(handle_sigint=False)
 
         # Store session
