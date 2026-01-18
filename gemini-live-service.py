@@ -278,19 +278,22 @@ async def create_gemini_session(websocket, call_id: str, caller_name: str):
     try:
         # --- SAME as test_gemini_live_working.py ---
 
-        # 1. Create LLM (same as working implementation)
+        # 1. Load system prompt first
+        system_prompt = load_conversation_script()
+
+        # 2. Create LLM with system_instruction (pass directly to Gemini Live)
         llm = GeminiLiveLLMService(
             api_key=google_api_key,
-            voice_id="Charon"  # Same voice as working implementation
+            voice_id="Charon",  # Same voice as working implementation
+            system_instruction=system_prompt  # Pass system instruction directly
         )
-        log(f"[{call_id}] Gemini Service Ready (Voice: Charon)")
+        log(f"[{call_id}] Gemini Service Ready (Voice: Charon) with system_instruction")
 
-        # 2. Create context with system prompt (SAME structure as working implementation)
-        system_prompt = load_conversation_script()
+        # 3. Create context and aggregator (for conversation history)
         messages = [{"role": "system", "content": system_prompt}]
         context = LLMContext(messages=messages)
         context_aggregator = LLMContextAggregatorPair(context)
-        log(f"[{call_id}] Created LLMContext and context aggregator (same as working)")
+        log(f"[{call_id}] Created LLMContext and context aggregator")
 
         # 3. Create transports (WebSocket versions of transport.input()/output())
         input_transport = WebSocketInputTransport(call_id)
