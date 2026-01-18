@@ -98,9 +98,10 @@ class GeminiWebSocketClient:
                     elif msg_type == "audio":
                         # Audio from Gemini Live (TTS output)
                         audio_hex = data.get("data", "")
+                        sample_rate = data.get("sample_rate", 24000)
                         if audio_hex and self.on_audio_output:
                             audio_bytes = bytes.fromhex(audio_hex)
-                            await self.on_audio_output(audio_bytes)
+                            await self.on_audio_output(audio_bytes, sample_rate)
 
                     elif msg_type == "stopped":
                         logger.info(f"Gemini Live stopped for call {self.call_id}")

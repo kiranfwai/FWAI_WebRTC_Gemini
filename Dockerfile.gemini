@@ -1,5 +1,5 @@
 # Gemini Live Service
-# Uses Pipecat for Gemini Live integration
+# Uses Pipecat for Gemini Live integration with context aggregators
 
 FROM python:3.11-slim
 
@@ -13,11 +13,11 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Install Python dependencies for Gemini Live service
+# Using pipecat 0.0.97+ with google-genai extras for proper Gemini Live support
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
-    "pipecat-ai[google]" \
-    openai \
-    websockets==12.0 \
+    "pipecat-ai[google]>=0.0.97" \
+    "websockets>=13.0.0" \
     python-dotenv==1.0.0
 
 # Copy application code

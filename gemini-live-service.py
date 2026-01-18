@@ -1,6 +1,6 @@
 """
 Gemini Live Service for WhatsApp Calls
-Uses Gemini Live directly for real-time voice conversations via WebSocket
+Uses the SAME logic as test_gemini_live_working.py - just with WebSocket I/O instead of Daily transport
 """
 
 import os
@@ -18,7 +18,6 @@ def log_to_file(message):
     with open(LOG_FILE, "a") as f:
         f.write(f"[{timestamp}] {message}\n")
 
-# Overwrite log file on startup
 with open(LOG_FILE, "w") as f:
     f.write(f"=== Gemini Live Service Log - Started at {datetime.now()} ===\n\n")
 
@@ -30,250 +29,365 @@ def log(message):
 try:
     from dotenv import load_dotenv
     load_dotenv()
-    log("✅ Loaded environment variables from .env file")
+    log("Loaded environment variables from .env file")
 except ImportError:
-    log("ℹ️  python-dotenv not installed. Using system environment variables only.")
+    log("python-dotenv not installed")
 
-# Try to add src to path
-current_dir = os.path.dirname(__file__)
-src_path = os.path.join(current_dir, 'src')
-if os.path.exists(src_path):
-    sys.path.insert(0, src_path)
-
-# Pipecat imports
+# Pipecat imports - SAME as test_gemini_live_working.py
 try:
-    from pipecat.services.gemini_multimodal_live.gemini import GeminiMultimodalLiveLLMService
-    from pipecat.frames.frames import (
-        Frame, StartFrame, EndFrame,
-        TTSAudioRawFrame,
-        TranscriptionFrame, TextFrame,
-        LLMMessagesAppendFrame,
-    )
-    from pipecat.services.gemini_multimodal_live.gemini import InputAudioRawFrame
     from pipecat.pipeline.pipeline import Pipeline
     from pipecat.pipeline.task import PipelineTask, PipelineParams
     from pipecat.pipeline.runner import PipelineRunner
+    from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
+    from pipecat.processors.aggregators.llm_context import LLMContext
+    from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+    from pipecat.frames.frames import (
+        Frame,
+        InputAudioRawFrame,
+        OutputAudioRawFrame,
+        LLMMessagesFrame,
+        LLMMessagesUpdateFrame,
+        StartFrame, EndFrame,
+        TranscriptionFrame, LLMTextFrame, TTSAudioRawFrame
+    )
     from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
+    from pipecat.transports.base_input import BaseInputTransport
+    from pipecat.transports.base_output import BaseOutputTransport
 
-    # Alias for backward compatibility
-    GeminiLiveLLMService = GeminiMultimodalLiveLLMService
-    AudioRawFrame = InputAudioRawFrame
-
-    PIPECAT_AVAILABLE = True
-    log("✅ Pipecat imports successful (gemini_multimodal_live)")
+    log("Pipecat imports successful (same as test_gemini_live_working.py)")
 except ImportError as e:
-    log(f"❌ Pipecat import error: {e}")
+    log(f"Pipecat import error: {e}")
     import traceback
     log(traceback.format_exc())
-    PIPECAT_AVAILABLE = False
     sys.exit(1)
 
 # WebSocket imports
 try:
     import websockets
     from websockets.server import serve
-    WEBSOCKET_AVAILABLE = True
 except ImportError:
-    log("❌ websockets not installed. Install with: pip install websockets")
-    WEBSOCKET_AVAILABLE = False
+    log("websockets not installed")
     sys.exit(1)
 
 # Load conversation script
 CONVERSATION_SCRIPT_PATH = "FAWI_Call_BOT.txt"
 
 def load_conversation_script():
-    """Load FAWI_Call_BOT.txt and convert to system prompt"""
+    """Load FAWI_Call_BOT.txt - same prompt structure as working implementation"""
     try:
         if os.path.exists(CONVERSATION_SCRIPT_PATH):
             with open(CONVERSATION_SCRIPT_PATH, 'r', encoding='utf-8') as f:
                 script_content = f.read()
 
-            system_prompt = f"""You are Mousumi, a Senior Counselor at Freedom with AI. You help people guide their career path using AI skills and how they can make more money out of it.
+            # Match the working implementation's prompt structure
+            system_prompt = (
+                "IDENTITY: Mousumi, Senior AI Counselor @ Freedom with AI. "
+                "AUDIO_BEHAVIOR: "
+                "   - MUST use distinct Indian English accent. Syllable-timed rhythm. "
+                "   - TONE: Professional, friendly, empathetic, knowledgeable. trusted counselor vibe. "
+                "   - FILLERS: Rarely use 'umm' or small pauses to sound natural and realistic. "
 
-CONVERSATION SCRIPT:
-{script_content}
+                f"CONVERSATION SCRIPT: {script_content[:2000]} "  # Truncate if too long
 
-INSTRUCTIONS:
-- Follow the conversation flow from the script above
-- Be warm, friendly, and professional
-- Ask questions naturally and wait for responses
-- Use Indian English accent naturally
-- Guide the conversation through connecting questions, situation questions, problem-aware questions, solution-aware questions, and consequence questions
-- Present the three pillars when appropriate
-- Handle objections professionally
-- Keep responses conversational and natural"""
-
-            log(f"✅ Loaded conversation script from {CONVERSATION_SCRIPT_PATH}")
+                "RULES: "
+                "   - CRITICAL: Ask ONLY ONE question at a time. NEVER ask multiple questions in a single response. "
+                "   - After asking a question, STOP speaking immediately. DO NOT continue with follow-up questions. "
+                "   - WAIT for the user to respond completely before asking the next question. "
+                "   - Listen actively to their full response. Validate their answers before moving to the next stage. "
+                "   - Keep responses conversational and natural, but always pause after each question. "
+                "   - If system says 'SYSTEM_COMMAND', speak the Greeting immediately."
+            )
+            log(f"Loaded conversation script from {CONVERSATION_SCRIPT_PATH}")
             return system_prompt
         else:
-            log(f"⚠️  Conversation script not found: {CONVERSATION_SCRIPT_PATH}")
-            return "You are Mousumi, a Senior Counselor at Freedom with AI. Help people with AI skills and career guidance."
+            return "You are Mousumi, a Senior Counselor at Freedom with AI. Use Indian English accent."
     except Exception as e:
-        log(f"❌ Error loading conversation script: {e}")
+        log(f"Error loading conversation script: {e}")
         return "You are Mousumi, a Senior Counselor at Freedom with AI."
 
 
-class WebSocketAudioOutput(FrameProcessor):
-    """Sends audio from Gemini Live to the WebSocket client"""
+class WebSocketInputTransport(FrameProcessor):
+    """
+    Replaces transport.input() from Daily transport.
+    Receives audio from WebSocket and produces InputAudioRawFrame into pipeline.
+    """
+    def __init__(self, call_id):
+        super().__init__()
+        self.call_id = call_id
+        self._audio_queue = asyncio.Queue()
+        self._running = False
+        self._frame_count = 0
 
+    async def start(self):
+        """Start producing frames into the pipeline."""
+        self._running = True
+        log(f"[{self.call_id}] WebSocket input transport started")
+
+    async def stop(self):
+        """Stop the transport."""
+        self._running = False
+        await self._audio_queue.put(None)  # Signal to stop
+
+    async def push_audio(self, audio_data: bytes):
+        """Push audio from WebSocket into the queue."""
+        if self._running:
+            await self._audio_queue.put(audio_data)
+
+    async def run_input_loop(self, task: PipelineTask):
+        """
+        Background task that reads from audio queue and pushes frames into pipeline.
+        This mimics what transport.input() does in Daily transport.
+        """
+        log(f"[{self.call_id}] Starting input loop")
+        while self._running:
+            try:
+                audio_data = await asyncio.wait_for(self._audio_queue.get(), timeout=0.1)
+                if audio_data is None:
+                    break
+
+                # Create and queue InputAudioRawFrame - same as Daily transport does
+                frame = InputAudioRawFrame(
+                    audio=audio_data,
+                    sample_rate=16000,
+                    num_channels=1
+                )
+                self._frame_count += 1
+                if self._frame_count <= 3 or self._frame_count % 100 == 0:
+                    log(f"[{self.call_id}] Queued input frame #{self._frame_count}: {len(audio_data)} bytes")
+                await task.queue_frame(frame)
+
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                log(f"[{self.call_id}] Input loop error: {e}")
+                break
+        log(f"[{self.call_id}] Input loop ended")
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Pass through frames."""
+        await super().process_frame(frame, direction)
+        await self.push_frame(frame, direction)
+
+
+class WebSocketOutputTransport(FrameProcessor):
+    """
+    Replaces transport.output() from Daily transport.
+    Receives TTSAudioRawFrame/OutputAudioRawFrame and sends to WebSocket.
+    """
     def __init__(self, websocket, call_id):
         super().__init__()
         self.websocket = websocket
         self.call_id = call_id
-        self.is_active = True
+        self._running = True
+        self._output_count = 0
+
+    async def stop(self):
+        self._running = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Process frames and send audio to WebSocket."""
         await super().process_frame(frame, direction)
 
-        # Log all frame types for debugging
-        frame_type = type(frame).__name__
-        if frame_type not in ['SystemFrame', 'MetricsFrame']:
-            log(f"🔄 Frame received: {frame_type}")
-
-        # Send audio frames to WebSocket
-        if isinstance(frame, TTSAudioRawFrame) and self.is_active:
+        # Send audio frames to WebSocket - same types that Daily transport.output() handles
+        if isinstance(frame, (TTSAudioRawFrame, OutputAudioRawFrame)) and self._running:
             try:
+                audio_data = frame.audio
+                if isinstance(audio_data, bytes):
+                    audio_hex = audio_data.hex()
+                else:
+                    audio_hex = bytes(audio_data).hex()
+
+                sample_rate = getattr(frame, 'sample_rate', 24000)
+
+                self._output_count += 1
+
                 await self.websocket.send(json.dumps({
                     "type": "audio",
-                    "data": frame.audio.hex() if isinstance(frame.audio, bytes) else frame.audio
+                    "data": audio_hex,
+                    "sample_rate": sample_rate,
+                    "num_channels": 1
                 }))
-                log(f"📤 Sent {len(frame.audio)} bytes audio to client")
+                if self._output_count <= 5 or self._output_count % 50 == 0:
+                    log(f"[{self.call_id}] Sent output #{self._output_count}: {len(audio_data)} bytes at {sample_rate}Hz")
             except Exception as e:
-                log(f"❌ Error sending audio: {e}")
-
-        # Log transcriptions
-        if isinstance(frame, TranscriptionFrame):
-            text = getattr(frame, 'text', '').strip()
-            if text:
-                log(f"👤 USER: {text}")
-
-        if isinstance(frame, TextFrame):
-            text = getattr(frame, 'text', '').strip()
-            if text:
-                log(f"🤖 BOT: {text}")
+                log(f"[{self.call_id}] Error sending audio: {e}")
 
         await self.push_frame(frame, direction)
 
 
-class WebSocketAudioInput(FrameProcessor):
-    """Receives audio from WebSocket and sends to pipeline"""
-
+class ChatLogger(FrameProcessor):
+    """
+    SAME as test_gemini_live_working.py - logs conversation flow.
+    """
     def __init__(self, call_id):
         super().__init__()
         self.call_id = call_id
-        self.audio_queue = asyncio.Queue()
+        self._bot_buffer = ""
+        self._frame_count = 0
+        self._audio_frame_count = 0
 
-    async def queue_audio(self, audio_data: bytes):
-        """Queue audio from WebSocket to be processed"""
-        await self.audio_queue.put(audio_data)
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
+    async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
-        await self.push_frame(frame, direction)
+
+        self._frame_count += 1
+
+        # Log frame types for debugging (first few and then periodically)
+        if self._frame_count <= 10 or self._frame_count % 200 == 0:
+            log(f"[{self.call_id}] ChatLogger frame #{self._frame_count}: {type(frame).__name__} (dir={direction})")
+
+        # Log User Input
+        if isinstance(frame, TranscriptionFrame):
+            text = getattr(frame, 'text', '').strip()
+            if text:
+                log(f"[{self.call_id}] USER: {text}")
+
+        # Log Bot Output
+        elif isinstance(frame, LLMTextFrame):
+            self._bot_buffer += frame.text
+            log(f"[{self.call_id}] LLMTextFrame: {frame.text[:100]}...")
+
+        elif isinstance(frame, LLMMessagesFrame):
+            if self._bot_buffer.strip():
+                log(f"[{self.call_id}] BOT: {self._bot_buffer.strip()}")
+                self._bot_buffer = ""
+
+        # Log audio output frames
+        elif isinstance(frame, (TTSAudioRawFrame, OutputAudioRawFrame)):
+            self._audio_frame_count += 1
+            if self._audio_frame_count <= 3 or self._audio_frame_count % 50 == 0:
+                log(f"[{self.call_id}] Audio output frame #{self._audio_frame_count}: {len(frame.audio)} bytes")
+
+        await self.push_frame(frame)
 
 
-# Global call sessions
+# Global sessions
 active_calls = {}
 
 
-async def create_gemini_live_session(websocket, call_id, caller_name):
-    """Create Gemini Live session for a call"""
-    log(f"🚀 Creating Gemini Live session for call {call_id}")
+async def create_gemini_session(websocket, call_id: str, caller_name: str):
+    """
+    Create Gemini Live session using SAME structure as test_gemini_live_working.py
+    """
+    log(f"[{call_id}] Creating Gemini Live session (same logic as working implementation)")
 
     google_api_key = os.getenv("GOOGLE_API_KEY")
     if not google_api_key:
-        log("❌ GOOGLE_API_KEY not found in environment variables")
+        log(f"[{call_id}] GOOGLE_API_KEY not found")
         return None
 
     try:
-        # Create Gemini Live service with system prompt
-        system_prompt = load_conversation_script()
+        # --- SAME as test_gemini_live_working.py ---
 
+        # 1. Create LLM (same as working implementation)
         llm = GeminiLiveLLMService(
             api_key=google_api_key,
-            voice_id="Kore",
-            system_instruction=system_prompt,
-            inference_on_context_initialization=True,  # Make Gemini speak first
+            voice_id="Charon"  # Same voice as working implementation
         )
-        log(f"✅ Gemini Live LLM initialized (Voice: Kore)")
+        log(f"[{call_id}] Gemini Service Ready (Voice: Charon)")
 
-        # Create audio output processor
-        audio_output = WebSocketAudioOutput(websocket, call_id)
-        audio_input = WebSocketAudioInput(call_id)
+        # 2. Create context with system prompt (SAME structure as working implementation)
+        system_prompt = load_conversation_script()
+        messages = [{"role": "system", "content": system_prompt}]
+        context = LLMContext(messages=messages)
+        context_aggregator = LLMContextAggregatorPair(context)
+        log(f"[{call_id}] Created LLMContext and context aggregator (same as working)")
 
-        # Create simple pipeline: input -> LLM -> output
+        # 3. Create transports (WebSocket versions of transport.input()/output())
+        input_transport = WebSocketInputTransport(call_id)
+        output_transport = WebSocketOutputTransport(websocket, call_id)
+        chat_logger = ChatLogger(call_id)
+
+        # 4. Create pipeline - EXACT SAME STRUCTURE as test_gemini_live_working.py:
+        #    transport.input() -> context_aggregator.user() -> llm -> ChatLogger -> transport.output() -> context_aggregator.assistant()
         pipeline = Pipeline([
-            audio_input,
-            llm,
-            audio_output,
+            input_transport,              # = transport.input()
+            context_aggregator.user(),    # SAME
+            llm,                          # SAME
+            chat_logger,                  # SAME as ChatLogger()
+            output_transport,             # = transport.output()
+            context_aggregator.assistant() # SAME
         ])
+        log(f"[{call_id}] Pipeline created (same structure as working implementation)")
 
-        # Create task and runner
-        params = PipelineParams(allow_interruptions=True)
-        task = PipelineTask(pipeline, params=params)
-        runner = PipelineRunner()
+        # 5. Create task and runner (SAME as working implementation)
+        task = PipelineTask(pipeline, params=PipelineParams(allow_interruptions=True))
+        runner = PipelineRunner(handle_sigint=False)
 
         # Store session
-        active_calls[call_id] = {
+        session = {
             "llm": llm,
-            "audio_input": audio_input,
-            "audio_output": audio_output,
+            "context": context,
+            "context_aggregator": context_aggregator,
+            "input_transport": input_transport,
+            "output_transport": output_transport,
             "pipeline": pipeline,
             "task": task,
             "runner": runner,
             "websocket": websocket,
             "caller_name": caller_name,
         }
+        active_calls[call_id] = session
+
+        # Start input transport
+        await input_transport.start()
+
+        # Start input loop in background (reads from queue and pushes to pipeline)
+        input_loop_task = asyncio.create_task(input_transport.run_input_loop(task))
+        session["input_loop_task"] = input_loop_task
 
         # Start pipeline in background
         async def run_pipeline():
             try:
-                log(f"🚀 Starting pipeline for call {call_id}")
+                log(f"[{call_id}] Starting pipeline runner")
                 await runner.run(task)
-                log(f"✅ Pipeline completed for call {call_id}")
+                log(f"[{call_id}] Pipeline completed")
             except asyncio.CancelledError:
-                log(f"Pipeline cancelled for call {call_id}")
+                log(f"[{call_id}] Pipeline cancelled")
             except Exception as e:
-                log(f"❌ Pipeline error for call {call_id}: {e}")
+                log(f"[{call_id}] Pipeline error: {e}")
                 import traceback
                 log(traceback.format_exc())
 
         pipeline_task = asyncio.create_task(run_pipeline())
-        active_calls[call_id]["pipeline_task"] = pipeline_task
+        session["pipeline_task"] = pipeline_task
 
-        # Wait for pipeline to initialize and Gemini to connect
-        await asyncio.sleep(2.0)
+        # Wait for pipeline to initialize
+        await asyncio.sleep(1.0)
 
-        # Send an initial message to trigger Gemini to start speaking
-        try:
-            # Send a user message to trigger Gemini's greeting
-            initial_message = [{"role": "user", "content": "Hello, please greet me and introduce yourself."}]
-            messages_frame = LLMMessagesAppendFrame(messages=initial_message)
-            await task.queue_frame(messages_frame)
-            log(f"📤 Sent initial message to trigger Gemini for call {call_id}")
-        except Exception as e:
-            log(f"⚠️  Could not send initial message: {e}")
-            import traceback
-            log(traceback.format_exc())
+        # 6. Trigger greeting - SAME as test_gemini_live_working.py trigger_instant_greeting()
+        user_ref = f"Hi {caller_name}" if caller_name and caller_name != "Unknown" else "Hi"
+        greeting_text = f"{user_ref}, this is Mousumi from Freedom with AI. I noticed you showed interest in our AI programs. How are you doing today?"
 
-        log(f"✅ Gemini Live session started for call {call_id}")
-        return True
+        log(f"[{call_id}] Triggering greeting (same as working implementation)")
+
+        # Force Generation with System Command - using new pipecat API
+        trigger_msg = {
+            "role": "user",
+            "content": f"SYSTEM_COMMAND: The user has joined. Speak this EXACT greeting immediately with Indian Accent: '{greeting_text}'"
+        }
+
+        # Use LLMMessagesUpdateFrame with run_llm=True for pipecat 0.0.99+
+        await task.queue_frames([
+            LLMMessagesUpdateFrame(messages=[trigger_msg], run_llm=True)
+        ])
+
+        log(f"[{call_id}] Greeting signal sent!")
+        return session
 
     except Exception as e:
-        log(f"❌ Error creating Gemini Live session: {e}")
+        log(f"[{call_id}] Error creating session: {e}")
         import traceback
         log(traceback.format_exc())
         return None
 
 
 async def handle_websocket(websocket):
-    """Handle WebSocket connection from Node.js"""
+    """Handle WebSocket connection from main server."""
     call_id = None
-    caller_name = None
+    session = None
 
     try:
-        path = getattr(websocket, 'path', '/')
-        log(f"📡 WebSocket connection from {websocket.remote_address}")
+        log(f"WebSocket connection from {websocket.remote_address}")
 
         async for message in websocket:
             try:
@@ -285,8 +399,8 @@ async def handle_websocket(websocket):
                     caller_name = data.get("caller_name", "Unknown")
 
                     if call_id:
-                        success = await create_gemini_live_session(websocket, call_id, caller_name)
-                        if success:
+                        session = await create_gemini_session(websocket, call_id, caller_name)
+                        if session:
                             await websocket.send(json.dumps({"type": "started", "call_id": call_id}))
                         else:
                             await websocket.send(json.dumps({"type": "error", "message": "Failed to create session"}))
@@ -294,62 +408,68 @@ async def handle_websocket(websocket):
                         await websocket.send(json.dumps({"type": "error", "message": "call_id required"}))
 
                 elif msg_type == "audio":
-                    # Receive audio from WhatsApp
-                    if call_id and call_id in active_calls:
+                    # Receive audio from WhatsApp and push to input transport
+                    if session and call_id in active_calls:
                         audio_hex = data.get("data", "")
                         if audio_hex:
                             audio_data = bytes.fromhex(audio_hex)
-                            audio_input = active_calls[call_id]["audio_input"]
-
-                            # Create audio frame and push to pipeline
-                            audio_frame = AudioRawFrame(
-                                audio=audio_data,
-                                sample_rate=16000,
-                                num_channels=1
-                            )
-                            await audio_input.push_frame(audio_frame, FrameDirection.DOWNSTREAM)
-                            log(f"📥 Received {len(audio_data)} bytes audio from client")
+                            # Log first few audio messages
+                            if not hasattr(session, '_audio_count'):
+                                session['_audio_count'] = 0
+                            session['_audio_count'] += 1
+                            if session['_audio_count'] <= 5 or session['_audio_count'] % 100 == 0:
+                                log(f"[{call_id}] Received audio #{session['_audio_count']}: {len(audio_data)} bytes")
+                            # Push to input transport - it will create InputAudioRawFrame
+                            await session["input_transport"].push_audio(audio_data)
+                    else:
+                        log(f"[{call_id}] Audio received but no session or not in active_calls")
 
                 elif msg_type == "stop":
-                    if call_id and call_id in active_calls:
-                        call_info = active_calls[call_id]
+                    if session and call_id in active_calls:
+                        # Stop input transport
+                        await session["input_transport"].stop()
+                        await session["output_transport"].stop()
 
-                        # Cancel pipeline
-                        if "pipeline_task" in call_info:
-                            call_info["pipeline_task"].cancel()
+                        # Cancel tasks
+                        if "input_loop_task" in session:
+                            session["input_loop_task"].cancel()
+                        if "pipeline_task" in session:
+                            session["pipeline_task"].cancel()
 
                         del active_calls[call_id]
-                        log(f"✅ Call {call_id} stopped")
+                        log(f"[{call_id}] Call stopped")
                         await websocket.send(json.dumps({"type": "stopped", "call_id": call_id}))
 
             except json.JSONDecodeError:
-                log(f"❌ Invalid JSON: {message[:100]}")
+                log(f"Invalid JSON: {message[:100]}")
             except Exception as e:
-                log(f"❌ Error handling message: {e}")
+                log(f"Error handling message: {e}")
                 import traceback
                 log(traceback.format_exc())
 
     except websockets.exceptions.ConnectionClosed:
-        log(f"📡 WebSocket closed for call {call_id}")
+        log(f"WebSocket closed for call {call_id}")
     except Exception as e:
-        log(f"❌ WebSocket error: {e}")
+        log(f"WebSocket error: {e}")
     finally:
-        # Cleanup
-        if call_id and call_id in active_calls:
-            call_info = active_calls[call_id]
-            if "pipeline_task" in call_info:
-                call_info["pipeline_task"].cancel()
+        if session and call_id in active_calls:
+            await session["input_transport"].stop()
+            await session["output_transport"].stop()
+            if "input_loop_task" in session:
+                session["input_loop_task"].cancel()
+            if "pipeline_task" in session:
+                session["pipeline_task"].cancel()
             del active_calls[call_id]
 
 
 async def main():
     """Start WebSocket server"""
     port = int(os.getenv("GEMINI_LIVE_PORT", 8003))
-    log(f"🎙️  Gemini Live Service starting on ws://0.0.0.0:{port}")
+    log(f"Gemini Live Service starting on ws://0.0.0.0:{port}")
+    log(f"Using SAME pipeline logic as test_gemini_live_working.py")
 
     async with serve(handle_websocket, "0.0.0.0", port):
-        log(f"✅ Gemini Live Service running on ws://0.0.0.0:{port}")
-        log(f"   Waiting for connections from Node.js server...")
+        log(f"Gemini Live Service running on ws://0.0.0.0:{port}")
         await asyncio.Future()
 
 
@@ -357,4 +477,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        log("🛑 Server stopped")
+        log("Server stopped")

@@ -20,7 +20,8 @@ from webrtc_handler import (
     handle_incoming_call,
     handle_ice_candidate,
     terminate_call,
-    get_active_calls
+    get_active_calls,
+    active_sessions
 )
 
 # Configure logging
@@ -222,29 +223,45 @@ async def handle_call_events(request: Request):
                             logger.info(f"Call event: {call_event} for call {call_id} from {caller_phone}")
 
                             if call_event == "connect":
-                                # Incoming call - SDP is in session.sdp
-                                session = call_data.get("session", {})
-                                sdp_offer = session.get("sdp", "")
+                                # Get session data with SDP
+                                session_data = call_data.get("session", {})
+                                sdp = session_data.get("sdp", "")
+                                sdp_type = session_data.get("sdp_type", "")
+                                direction = call_data.get("direction", "")
 
-                                if sdp_offer:
-                                    logger.info(f"Processing incoming call from {caller_phone} ({caller_name})")
-                                    # Handle incoming call asynchronously
-                                    asyncio.create_task(
-                                        handle_incoming_call(
-                                            call_id=call_id,
-                                            caller_phone=caller_phone,
-                                            sdp_offer=sdp_offer,
-                                            caller_name=caller_name
+                                if sdp:
+                                    if direction == "BUSINESS_INITIATED":
+                                        # Outbound call - we get the answer from remote party
+                                        logger.info(f"Outbound call connected: {call_id}")
+                                        if call_id in active_sessions and sdp_type == "answer":
+                                            session = active_sessions[call_id]
+                                            await session.handle_answer(sdp)
+                                            logger.info(f"SDP answer set for outbound call {call_id}")
+                                    else:
+                                        # Inbound call (USER_INITIATED) - we get offer, need to answer
+                                        logger.info(f"Processing incoming call from {caller_phone} ({caller_name})")
+                                        asyncio.create_task(
+                                            handle_incoming_call(
+                                                call_id=call_id,
+                                                caller_phone=caller_phone,
+                                                sdp_offer=sdp,
+                                                caller_name=caller_name
+                                            )
                                         )
-                                    )
                                 else:
                                     logger.warning(f"No SDP in connect event for call {call_id}")
 
                             elif call_event == "answer":
                                 # Call was answered (for outbound calls)
-                                session = call_data.get("session", {})
-                                sdp_answer = session.get("sdp", "")
+                                session_data = call_data.get("session", {})
+                                sdp_answer = session_data.get("sdp", "")
                                 logger.info(f"Call answered: {call_id}")
+
+                                if sdp_answer and call_id in active_sessions:
+                                    # Set remote description for outbound call
+                                    session = active_sessions[call_id]
+                                    await session.handle_answer(sdp_answer)
+                                    logger.info(f"SDP answer processed for outbound call {call_id}")
 
                             elif call_event == "ice_candidate":
                                 # ICE candidate

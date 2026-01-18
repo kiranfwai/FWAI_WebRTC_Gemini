@@ -73,23 +73,28 @@ class AudioOutputTrack(MediaStreamTrack):
 
         return frame
 
-    async def push_audio(self, audio_data: bytes):
+    async def push_audio(self, audio_data: bytes, input_sample_rate: int = 24000):
         """
         Push audio data from Gemini to be played to caller
 
         Args:
-            audio_data: PCM audio bytes (16kHz mono 16-bit from Gemini)
+            audio_data: PCM audio bytes (mono 16-bit from Gemini)
+            input_sample_rate: Sample rate of input audio (default 24kHz from Gemini)
         """
-        # Resample from 16kHz to 48kHz
-        audio_16k = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+        # Convert to numpy array
+        audio_input = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
 
-        # Simple linear interpolation resampling (3x for 16kHz -> 48kHz)
-        indices = np.linspace(0, len(audio_16k) - 1, len(audio_16k) * 3)
-        audio_48k = np.interp(indices, np.arange(len(audio_16k)), audio_16k)
-        audio_48k = np.clip(audio_48k, -32768, 32767).astype(np.int16)
+        # Calculate resampling ratio
+        ratio = self.sample_rate / input_sample_rate
+        num_output_samples = int(len(audio_input) * ratio)
+
+        # Resample using linear interpolation
+        indices = np.linspace(0, len(audio_input) - 1, num_output_samples)
+        audio_resampled = np.interp(indices, np.arange(len(audio_input)), audio_input)
+        audio_resampled = np.clip(audio_resampled, -32768, 32767).astype(np.int16)
 
         async with self._buffer_lock:
-            self._buffer += audio_48k.tobytes()
+            self._buffer += audio_resampled.tobytes()
 
 
 class AudioTrackReader:
@@ -265,11 +270,11 @@ class CallSession:
 
         logger.info(f"Audio processing started for call {self.call_id}")
 
-    async def _handle_gemini_audio(self, audio_data: bytes):
+    async def _handle_gemini_audio(self, audio_data: bytes, sample_rate: int = 24000):
         """Handle audio output from Gemini - sends to caller via WebRTC"""
         if self.output_track:
-            await self.output_track.push_audio(audio_data)
-            logger.debug(f"Pushed {len(audio_data)} bytes to output track")
+            await self.output_track.push_audio(audio_data, sample_rate)
+            logger.debug(f"Pushed {len(audio_data)} bytes at {sample_rate}Hz to output track")
 
     async def start_agent(self):
         """Start the Gemini voice agent"""
