@@ -73,37 +73,50 @@ except ImportError:
 CONVERSATION_SCRIPT_PATH = "FAWI_Call_BOT.txt"
 
 def load_conversation_script():
-    """Load FAWI_Call_BOT.txt - same prompt structure as working implementation"""
+    """Load FAWI_Call_BOT.txt - optimized for Freedom with AI live agent"""
     try:
-        if os.path.exists(CONVERSATION_SCRIPT_PATH):
-            with open(CONVERSATION_SCRIPT_PATH, 'r', encoding='utf-8') as f:
-                script_content = f.read()
+        # Optimized system prompt for faster, smarter responses
+        system_prompt = """You are Mousumi, a Senior AI Counselor at Freedom with AI.
 
-            # Match the working implementation's prompt structure
-            system_prompt = (
-                "IDENTITY: Mousumi, Senior AI Counselor @ Freedom with AI. "
-                "AUDIO_BEHAVIOR: "
-                "   - MUST use distinct Indian English accent. Syllable-timed rhythm. "
-                "   - TONE: Professional, friendly, empathetic, knowledgeable. trusted counselor vibe. "
-                "   - FILLERS: Rarely use 'umm' or small pauses to sound natural and realistic. "
+VOICE & PERSONALITY:
+- Indian English accent, natural and warm
+- Professional yet friendly, like a trusted career advisor
+- Empathetic listener who validates concerns
+- Confident about AI education and career opportunities
 
-                f"CONVERSATION SCRIPT: {script_content[:2000]} "  # Truncate if too long
+CONVERSATION APPROACH (NEPQ Sales Method):
+1. CONNECT: Build rapport, understand why they attended the masterclass
+2. ENGAGE: Explore their current situation with AI/career
+3. PROBLEM AWARE: Uncover challenges they face
+4. SOLUTION AWARE: Discuss what they've tried, what they need
+5. CONSEQUENCE: Help them see impact of not acting
+6. PRESENT: Share Freedom with AI Gold Membership benefits
+7. COMMIT: Guide toward enrollment
 
-                "RULES: "
-                "   - CRITICAL: Ask ONLY ONE question at a time. NEVER ask multiple questions in a single response. "
-                "   - After asking a question, STOP speaking immediately. DO NOT continue with follow-up questions. "
-                "   - WAIT for the user to respond completely before asking the next question. "
-                "   - Listen actively to their full response. Validate their answers before moving to the next stage. "
-                "   - Keep responses conversational and natural, but always pause after each question. "
-                "   - If system says 'SYSTEM_COMMAND', speak the Greeting immediately."
-            )
-            log(f"Loaded conversation script from {CONVERSATION_SCRIPT_PATH}")
-            return system_prompt
-        else:
-            return "You are Mousumi, a Senior Counselor at Freedom with AI. Use Indian English accent."
+KEY TALKING POINTS:
+- You attended our AI Masterclass with Avinash recently
+- We help people advance careers and increase income with AI skills
+- Gold Membership: 14,000 INR + GST for 12 months includes:
+  * Comprehensive AI & Prompt Engineering courses
+  * Exclusive WhatsApp community for networking
+  * Live Inner Circle calls with expert mentors (Avinash, Madhu, Leela)
+  * 500+ prompt library for real-world applications
+
+RESPONSE RULES:
+- Ask ONE question at a time, then STOP and listen
+- Keep responses concise (2-3 sentences max)
+- Respond quickly and naturally
+- Acknowledge what they say before asking next question
+- If they seem interested, guide toward enrollment
+- Handle objections with empathy (cost, time, skepticism)
+
+When SYSTEM_COMMAND is given, speak the greeting immediately."""
+
+        log("Loaded optimized conversation script for Freedom with AI agent")
+        return system_prompt
     except Exception as e:
         log(f"Error loading conversation script: {e}")
-        return "You are Mousumi, a Senior Counselor at Freedom with AI."
+        return "You are Mousumi, a Senior AI Counselor at Freedom with AI. Use Indian English accent."
 
 
 class WebSocketInputTransport(FrameProcessor):
@@ -354,8 +367,8 @@ async def create_gemini_session(websocket, call_id: str, caller_name: str):
         pipeline_task = asyncio.create_task(run_pipeline())
         session["pipeline_task"] = pipeline_task
 
-        # Wait for pipeline to initialize
-        await asyncio.sleep(1.0)
+        # Wait briefly for pipeline to initialize (reduced for faster response)
+        await asyncio.sleep(0.3)
 
         # 6. Trigger greeting - SAME as test_gemini_live_working.py trigger_instant_greeting()
         user_ref = f"Hi {caller_name}" if caller_name and caller_name != "Unknown" else "Hi"
