@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  # Gemini Live Service (port 8003)
+  # Must start first - main server connects to this
+  gemini-live:
+    build:
+      context: .
+      dockerfile: Dockerfile.gemini
+    container_name: gemini-live-service
+    ports:
+      - "8003:8003"
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GEMINI_LIVE_PORT=8003
+    volumes:
+      - ./FAWI_Call_BOT.txt:/app/FAWI_Call_BOT.txt:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s = socket.socket(); s.connect(('localhost', 8003)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Main Server (port 3000)
+  # Handles WhatsApp WebRTC and connects to gemini-live
+  main-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: whatsapp-voice-server
+    ports:
+      - "3000:3000"
+    environment:
+      - PHONE_NUMBER_ID=${PHONE_NUMBER_ID}
+      - META_ACCESS_TOKEN=${META_ACCESS_TOKEN}
+      - META_VERIFY_TOKEN=${META_VERIFY_TOKEN}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - PORT=3000
+      - HOST=0.0.0.0
+      - DEBUG=true
+      # Connect to gemini-live service in Docker network
+      - GEMINI_LIVE_HOST=gemini-live
+      - GEMINI_LIVE_PORT=8003
+    depends_on:
+      gemini-live:
+        condition: service_healthy
+    restart: unless-stopped

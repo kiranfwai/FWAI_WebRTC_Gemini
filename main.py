@@ -205,47 +205,57 @@ async def handle_call_events(request: Request):
             for entry in body.get("entry", []):
                 for change in entry.get("changes", []):
                     value = change.get("value", {})
+                    contacts = value.get("contacts", [])
 
-                    # Handle call events
-                    if "call" in value:
-                        call_data = value.get("call", {})
-                        call_event = call_data.get("call_event")
-                        call_id = call_data.get("call_id")
+                    # Get caller info from contacts
+                    caller_name = "Customer"
+                    if contacts:
+                        caller_name = contacts[0].get("profile", {}).get("name", "Customer")
 
-                        logger.info(f"Call event: {call_event} for call {call_id}")
+                    # Handle call events - WhatsApp uses "calls" array
+                    if "calls" in value:
+                        for call_data in value.get("calls", []):
+                            call_id = call_data.get("id")
+                            call_event = call_data.get("event")
+                            caller_phone = call_data.get("from", "")
 
-                        if call_event == "connect":
-                            # Incoming call
-                            caller = call_data.get("from", {})
-                            caller_phone = caller.get("phone_number", "")
-                            caller_name = caller.get("name", "Customer")
-                            sdp_offer = call_data.get("sdp", "")
+                            logger.info(f"Call event: {call_event} for call {call_id} from {caller_phone}")
 
-                            if sdp_offer:
-                                # Handle incoming call asynchronously
-                                asyncio.create_task(
-                                    handle_incoming_call(
-                                        call_id=call_id,
-                                        caller_phone=caller_phone,
-                                        sdp_offer=sdp_offer,
-                                        caller_name=caller_name
+                            if call_event == "connect":
+                                # Incoming call - SDP is in session.sdp
+                                session = call_data.get("session", {})
+                                sdp_offer = session.get("sdp", "")
+
+                                if sdp_offer:
+                                    logger.info(f"Processing incoming call from {caller_phone} ({caller_name})")
+                                    # Handle incoming call asynchronously
+                                    asyncio.create_task(
+                                        handle_incoming_call(
+                                            call_id=call_id,
+                                            caller_phone=caller_phone,
+                                            sdp_offer=sdp_offer,
+                                            caller_name=caller_name
+                                        )
                                     )
-                                )
+                                else:
+                                    logger.warning(f"No SDP in connect event for call {call_id}")
 
-                        elif call_event == "answer":
-                            # Call was answered (for outbound calls)
-                            sdp_answer = call_data.get("sdp", "")
-                            logger.info(f"Call answered: {call_id}")
+                            elif call_event == "answer":
+                                # Call was answered (for outbound calls)
+                                session = call_data.get("session", {})
+                                sdp_answer = session.get("sdp", "")
+                                logger.info(f"Call answered: {call_id}")
 
-                        elif call_event == "ice_candidate":
-                            # ICE candidate
-                            candidate = call_data.get("ice_candidate", {})
-                            await handle_ice_candidate(call_id, candidate)
+                            elif call_event == "ice_candidate":
+                                # ICE candidate
+                                candidate = call_data.get("ice_candidate", {})
+                                await handle_ice_candidate(call_id, candidate)
 
-                        elif call_event in ["terminate", "reject", "timeout"]:
-                            # Call ended
-                            logger.info(f"Call ended: {call_id} ({call_event})")
-                            await terminate_call(call_id)
+                            elif call_event in ["terminate", "reject", "timeout"]:
+                                # Call ended
+                                status = call_data.get("status", "")
+                                logger.info(f"Call ended: {call_id} ({call_event}) status={status}")
+                                await terminate_call(call_id)
 
         return JSONResponse(content={"status": "ok"})
 

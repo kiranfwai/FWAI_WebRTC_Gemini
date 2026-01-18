@@ -6,17 +6,90 @@ Provides full audio access for bidirectional communication with Gemini Live
 
 import asyncio
 import uuid
+import fractions
 from typing import Optional, Dict, Any, Callable, Awaitable
 from loguru import logger
 import numpy as np
 
-from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, RTCConfiguration, RTCIceServer
 from aiortc.mediastreams import MediaStreamTrack
+from av import AudioFrame
 
 from config import config
 from whatsapp_client import whatsapp_client
 from audio_processor import AudioProcessor
 from gemini_agent import create_agent, stop_agent, GeminiVoiceAgent
+
+
+class AudioOutputTrack(MediaStreamTrack):
+    """
+    Custom audio track that outputs audio from Gemini to the caller
+    """
+    kind = "audio"
+
+    def __init__(self, sample_rate: int = 48000):
+        super().__init__()
+        self.sample_rate = sample_rate
+        self._audio_queue: asyncio.Queue = asyncio.Queue()
+        self._pts = 0
+        self._time_base = fractions.Fraction(1, sample_rate)
+        self._frame_samples = 960  # 20ms at 48kHz
+
+        # Buffer for incoming audio
+        self._buffer = bytes()
+        self._buffer_lock = asyncio.Lock()
+
+    async def recv(self):
+        """Generate audio frames for the track"""
+        # Target frame size: 20ms at 48kHz = 960 samples
+        bytes_needed = self._frame_samples * 2  # 16-bit = 2 bytes per sample
+
+        # Try to get audio from buffer
+        async with self._buffer_lock:
+            if len(self._buffer) >= bytes_needed:
+                audio_bytes = self._buffer[:bytes_needed]
+                self._buffer = self._buffer[bytes_needed:]
+            else:
+                # Generate silence if no audio available
+                audio_bytes = bytes(bytes_needed)
+
+        # Convert to numpy array
+        audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
+
+        # Create AudioFrame
+        frame = AudioFrame(format='s16', layout='mono', samples=len(audio_array))
+        frame.sample_rate = self.sample_rate
+        frame.pts = self._pts
+        frame.time_base = self._time_base
+
+        # Copy audio data to frame
+        frame.planes[0].update(audio_array.tobytes())
+
+        # Update PTS for next frame
+        self._pts += len(audio_array)
+
+        # Wait a bit to maintain timing (~20ms between frames)
+        await asyncio.sleep(0.02)
+
+        return frame
+
+    async def push_audio(self, audio_data: bytes):
+        """
+        Push audio data from Gemini to be played to caller
+
+        Args:
+            audio_data: PCM audio bytes (16kHz mono 16-bit from Gemini)
+        """
+        # Resample from 16kHz to 48kHz
+        audio_16k = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+
+        # Simple linear interpolation resampling (3x for 16kHz -> 48kHz)
+        indices = np.linspace(0, len(audio_16k) - 1, len(audio_16k) * 3)
+        audio_48k = np.interp(indices, np.arange(len(audio_16k)), audio_16k)
+        audio_48k = np.clip(audio_48k, -32768, 32767).astype(np.int16)
+
+        async with self._buffer_lock:
+            self._buffer += audio_48k.tobytes()
 
 
 class AudioTrackReader:
@@ -122,6 +195,9 @@ class CallSession:
         self.audio_processor: Optional[AudioProcessor] = None
         self.track_reader: Optional[AudioTrackReader] = None
 
+        # Audio output track (sends audio to caller)
+        self.output_track: Optional[AudioOutputTrack] = None
+
         # Gemini agent
         self.agent: Optional[GeminiVoiceAgent] = None
 
@@ -133,11 +209,10 @@ class CallSession:
 
     async def setup_peer_connection(self):
         """Create and configure the RTCPeerConnection"""
-        ice_servers = [{"urls": s["urls"]} for s in config.ice_servers]
+        ice_servers = [RTCIceServer(urls=s["urls"]) for s in config.ice_servers]
+        rtc_config = RTCConfiguration(iceServers=ice_servers)
 
-        self.pc = RTCPeerConnection(configuration={
-            "iceServers": ice_servers
-        })
+        self.pc = RTCPeerConnection(configuration=rtc_config)
 
         # Handle incoming audio track (from WhatsApp caller)
         @self.pc.on("track")
@@ -191,9 +266,10 @@ class CallSession:
         logger.info(f"Audio processing started for call {self.call_id}")
 
     async def _handle_gemini_audio(self, audio_data: bytes):
-        """Handle audio output from Gemini"""
-        # Queue audio for output
-        await self._audio_output_queue.put(audio_data)
+        """Handle audio output from Gemini - sends to caller via WebRTC"""
+        if self.output_track:
+            await self.output_track.push_audio(audio_data)
+            logger.debug(f"Pushed {len(audio_data)} bytes to output track")
 
     async def start_agent(self):
         """Start the Gemini voice agent"""
@@ -214,8 +290,11 @@ class CallSession:
         """Create SDP offer for outbound call"""
         await self.setup_peer_connection()
 
-        # Add transceivers for audio
-        self.pc.addTransceiver("audio", direction="sendrecv")
+        # Create output track for sending audio to caller
+        self.output_track = AudioOutputTrack(sample_rate=48000)
+
+        # Add the audio track to the peer connection
+        self.pc.addTrack(self.output_track)
 
         # Create offer
         offer = await self.pc.createOffer()
@@ -235,6 +314,12 @@ class CallSession:
     async def handle_offer(self, sdp_offer: str) -> str:
         """Handle incoming call with SDP offer"""
         await self.setup_peer_connection()
+
+        # Create output track for sending audio to caller
+        self.output_track = AudioOutputTrack(sample_rate=48000)
+
+        # Add the audio track to the peer connection
+        self.pc.addTrack(self.output_track)
 
         # Set remote description (offer from WhatsApp)
         offer = RTCSessionDescription(sdp=sdp_offer, type="offer")
@@ -286,6 +371,10 @@ class CallSession:
         # Stop track reader
         if self.track_reader:
             await self.track_reader.stop()
+
+        # Stop output track
+        if self.output_track:
+            self.output_track.stop()
 
         # Stop audio processor
         if self.audio_processor:
