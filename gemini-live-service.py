@@ -15,10 +15,33 @@ from collections import deque
 import io
 import wave
 
+# Transcript log file
+TRANSCRIPT_LOG_FILE = "/app/audio_debug/call_transcripts.log"
+
 # Setup logging
 def log(message):
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{timestamp}] {message}")
+
+
+def log_transcript(call_id: str, speaker: str, text: str):
+    """Log transcript to file for both user and agent speech"""
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        short_id = call_id[:8] if len(call_id) > 8 else call_id
+        log_line = f"[{timestamp}] [{short_id}] {speaker}: {text}\n"
+
+        # Also print to console with highlighting
+        if speaker == "AGENT":
+            print(f"🤖 {log_line.strip()}")
+        else:
+            print(f"👤 {log_line.strip()}")
+
+        # Write to file
+        with open(TRANSCRIPT_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(log_line)
+    except Exception as e:
+        log(f"Error writing transcript: {e}")
 
 
 async def transcribe_audio_sarvam(audio_data: bytes, sample_rate: int = 16000) -> str:
@@ -186,6 +209,7 @@ class GeminiLiveSession:
             system_prompt = load_system_prompt()
 
             # Configure for native audio streaming
+            # Note: Gemini Live only supports AUDIO modality for voice conversations
             config = types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
                 speech_config=types.SpeechConfig(
@@ -258,14 +282,15 @@ class GeminiLiveSession:
             self._audio_in_count += 1
 
             # Audio already amplified by main server (webrtc_handler)
-            # Just log levels and pass through - no additional amplification to avoid distortion
             audio_array = np.frombuffer(audio_data, dtype=np.int16)
             max_val = np.max(np.abs(audio_array)) if len(audio_array) > 0 else 0
 
             await self._audio_queue.put(audio_data)
 
+            # Clear level-based logging
             if self._audio_in_count <= 10 or self._audio_in_count % 100 == 0:
-                log(f"[{self.call_id}] [AUDIO_IN] #{self._audio_in_count}: {len(audio_data)} bytes, max_level={max_val:.0f}")
+                is_speech = "🗣️ SPEECH" if max_val > 3000 else "silence"
+                log(f"📥 [WHATSAPP → SERVICE] #{self._audio_in_count}: {len(audio_data)}b, level={max_val:.0f} ({is_speech})")
 
     async def _audio_send_loop(self):
         """Send audio to Gemini Live"""
@@ -319,26 +344,18 @@ class GeminiLiveSession:
                         current_time = asyncio.get_event_loop().time()
                         silence_duration = current_time - silence_start_time
 
-                        # When silence detected after speech, signal end of turn to Gemini
+                        # When silence detected after speech, transcribe what user said
+                        # Note: Gemini handles turn-taking automatically, no need to send activity_end
                         if silence_duration >= SILENCE_DURATION_FOR_TURN_END and is_speaking and len(transcription_buffer) >= MIN_SPEECH_BYTES:
-                            # Check cooldown to prevent spamming activity_end
+                            # Check cooldown to prevent spamming transcriptions
                             if current_time - last_activity_end_time >= ACTIVITY_END_COOLDOWN:
                                 is_speaking = False
                                 last_activity_end_time = current_time
 
                                 # Transcribe in background to see what user said
+                                log(f"🛑 [USER FINISHED] Detected {silence_duration:.1f}s silence - transcribing speech")
                                 asyncio.create_task(self._transcribe_and_log(transcription_buffer))
                                 transcription_buffer = bytes()
-
-                                # Signal to Gemini that user has finished speaking
-                                # This tells Gemini it's time to respond
-                                try:
-                                    log(f"[{self.call_id}] Signaling activity_end (user finished speaking, {silence_duration:.1f}s silence)")
-                                    await self._session_context.send_realtime_input(
-                                        activity_end=types.ActivityEnd()
-                                    )
-                                except Exception as ae:
-                                    log(f"[{self.call_id}] Error sending activity_end: {ae}")
                 else:
                     # Voice detected - reset silence timer
                     silence_start_time = None
@@ -364,9 +381,16 @@ class GeminiLiveSession:
         """Transcribe audio and log what user said"""
         try:
             transcript = await transcribe_audio_sarvam(audio_data, sample_rate=16000)
-            log(f"[{self.call_id}] *** USER SAID: \"{transcript}\" ***")
+            if transcript and not transcript.startswith("["):
+                # Valid transcript - log to file and console
+                print(f"\n{'='*60}")
+                print(f"👤 [USER SAID]: \"{transcript}\"")
+                print(f"{'='*60}\n")
+                log_transcript(self.call_id, "Customer", transcript)
+            else:
+                log(f"[STT Result] {transcript}")
         except Exception as e:
-            log(f"[{self.call_id}] Transcription error: {e}")
+            log(f"[Transcription error] {e}")
 
     async def _send_audio_to_gemini(self, audio_data: bytes):
         """Send audio chunk to Gemini Live"""
@@ -384,10 +408,10 @@ class GeminiLiveSession:
             audio_array = np.frombuffer(audio_data, dtype=np.int16)
             max_val = np.max(np.abs(audio_array)) if len(audio_array) > 0 else 0
 
-            # Log audio being sent - more frequent initially
+            # Log audio being sent to Gemini
             if self._gemini_send_count <= 20 or self._gemini_send_count % 50 == 0:
-                is_speech = "SPEECH" if max_val > 500 else "silence"
-                log(f"[{self.call_id}] [GEMINI_SEND] #{self._gemini_send_count}: {len(audio_data)} bytes, max={max_val:.0f} ({is_speech})")
+                is_speech = "🗣️ SPEECH" if max_val > 3000 else "silence"
+                log(f"🚀 [SERVICE → GEMINI] #{self._gemini_send_count}: {len(audio_data)}b, level={max_val:.0f} ({is_speech})")
 
             # Send raw PCM bytes to Gemini Live
             # Format: 16-bit signed PCM, mono, 16kHz
@@ -433,16 +457,19 @@ class GeminiLiveSession:
                         content = response.server_content
 
                         if content.turn_complete:
-                            log(f"[{self.call_id}] Turn complete - ready for next input")
+                            log(f"✅ [TURN COMPLETE] Ready for next user input")
 
                         if content.interrupted:
-                            log(f"[{self.call_id}] Response interrupted by user")
+                            log(f"⚡ [INTERRUPTED] User interrupted agent response")
 
                         if content.model_turn and content.model_turn.parts:
                             for part in content.model_turn.parts:
-                                # Log text responses
+                                # Log text responses from Gemini
                                 if part.text:
-                                    log(f"[{self.call_id}] BOT TEXT: {part.text[:100]}...")
+                                    print(f"\n{'='*60}")
+                                    print(f"🤖 [AGENT SAID]: \"{part.text}\"")
+                                    print(f"{'='*60}\n")
+                                    log_transcript(self.call_id, "AGENT", part.text)
 
                                 # Send audio responses to WhatsApp
                                 if part.inline_data:
@@ -451,17 +478,18 @@ class GeminiLiveSession:
 
                                     # Handle if data is bytes or already decoded
                                     if isinstance(audio_data, str):
-                                        # It's base64 encoded string
                                         audio_bytes = base64.b64decode(audio_data)
                                     else:
-                                        # It's already bytes
                                         audio_bytes = audio_data
 
                                     self._audio_out_count += 1
                                     if self._audio_out_count <= 10 or self._audio_out_count % 50 == 0:
-                                        log(f"[{self.call_id}] [AUDIO_OUT] #{self._audio_out_count}: {len(audio_bytes)} bytes, mime={mime_type}")
+                                        log(f"📤 [GEMINI → SERVICE] #{self._audio_out_count}: {len(audio_bytes)}b audio response")
 
                                     await self._send_audio_to_whatsapp(audio_bytes)
+
+                                    if self._audio_out_count <= 10 or self._audio_out_count % 50 == 0:
+                                        log(f"📤 [SERVICE → WHATSAPP] #{self._audio_out_count}: Sent {len(audio_bytes)}b to caller")
 
             except asyncio.CancelledError:
                 break

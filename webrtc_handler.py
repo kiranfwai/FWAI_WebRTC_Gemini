@@ -332,34 +332,7 @@ class AudioTrackReader:
                         if processed and self.on_audio:
                             await self.on_audio(processed)
 
-                        # === TRANSCRIPTION: Accumulate audio and detect speech ===
-                        SILENCE_THRESHOLD = 500  # Audio level below this is silence
-                        MIN_SPEECH_BYTES = 16000  # ~0.5 sec at 16kHz (16000 samples * 2 bytes)
-                        SILENCE_DURATION = 0.8  # Seconds of silence to trigger transcription
-
-                        max_val_after = np.max(np.abs(audio_int16)) if len(audio_int16) > 0 else 0
-
-                        if max_val_after > SILENCE_THRESHOLD:
-                            # Speech detected
-                            self._is_speaking = True
-                            self._silence_start = None
-                            # Accumulate the resampled (16kHz) audio for transcription
-                            if processed:
-                                self._transcription_buffer += processed
-                        else:
-                            # Silence detected
-                            if self._is_speaking:
-                                if self._silence_start is None:
-                                    self._silence_start = asyncio.get_event_loop().time()
-                                else:
-                                    silence_duration = asyncio.get_event_loop().time() - self._silence_start
-                                    # After enough silence, transcribe what was said
-                                    if silence_duration >= SILENCE_DURATION and len(self._transcription_buffer) >= MIN_SPEECH_BYTES:
-                                        self._is_speaking = False
-                                        # Transcribe in background
-                                        buffer_to_transcribe = self._transcription_buffer
-                                        self._transcription_buffer = bytes()
-                                        asyncio.create_task(self._transcribe_and_log(buffer_to_transcribe))
+                        # Note: Transcription is handled in gemini-live-service.py to avoid duplicates
 
                 except Exception as e:
                     if self._running:
