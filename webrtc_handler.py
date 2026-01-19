@@ -7,9 +7,13 @@ Provides full audio access for bidirectional communication with Gemini Live
 import asyncio
 import uuid
 import fractions
+import os
+import io
+import wave
 from typing import Optional, Dict, Any, Callable, Awaitable
 from loguru import logger
 import numpy as np
+import aiohttp
 
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, RTCConfiguration, RTCIceServer
 from aiortc.mediastreams import MediaStreamTrack
@@ -19,6 +23,52 @@ from config import config
 from whatsapp_client import whatsapp_client
 from audio_processor import AudioProcessor
 from gemini_agent import create_agent, stop_agent, GeminiVoiceAgent
+
+
+# Sarvam STT for transcription debugging
+async def transcribe_audio_sarvam(audio_data: bytes, sample_rate: int = 16000) -> str:
+    """Transcribe audio using Sarvam AI STT to see what user is saying"""
+    api_key = os.getenv("SARVAM_API_KEY")
+    if not api_key:
+        return "[No Sarvam API key]"
+
+    try:
+        # Convert PCM to WAV format (Sarvam needs WAV)
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)  # 16-bit
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(audio_data)
+        wav_buffer.seek(0)
+        wav_bytes = wav_buffer.read()
+
+        # Call Sarvam STT API
+        url = "https://api.sarvam.ai/speech-to-text"
+
+        form_data = aiohttp.FormData()
+        form_data.add_field('file', wav_bytes, filename='audio.wav', content_type='audio/wav')
+        form_data.add_field('model', 'saarika:v2.5')
+        form_data.add_field('language_code', 'hi-IN')  # Hindi-English mix
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                data=form_data,
+                headers={"api-subscription-key": api_key},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    transcript = result.get("transcript", "")
+                    return transcript if transcript else "[empty]"
+                else:
+                    error_text = await response.text()
+                    return f"[STT error {response.status}: {error_text[:100]}]"
+    except asyncio.TimeoutError:
+        return "[STT timeout]"
+    except Exception as e:
+        return f"[STT error: {str(e)[:50]}]"
 
 
 class AudioOutputTrack(MediaStreamTrack):
@@ -81,6 +131,11 @@ class AudioOutputTrack(MediaStreamTrack):
             audio_data: PCM audio bytes (mono 16-bit from Gemini)
             input_sample_rate: Sample rate of input audio (default 24kHz from Gemini)
         """
+        # Track pushes
+        if not hasattr(self, '_push_count'):
+            self._push_count = 0
+        self._push_count += 1
+
         # Convert to numpy array
         audio_input = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
 
@@ -95,6 +150,8 @@ class AudioOutputTrack(MediaStreamTrack):
 
         async with self._buffer_lock:
             self._buffer += audio_resampled.tobytes()
+            if self._push_count <= 5 or self._push_count % 50 == 0:
+                logger.info(f"[OUTPUT_TRACK] push #{self._push_count}: {len(audio_data)}b in -> {len(audio_resampled)*2}b buffered, total buffer: {len(self._buffer)} bytes")
 
 
 class AudioTrackReader:
@@ -114,6 +171,16 @@ class AudioTrackReader:
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
+        # Transcription buffer - accumulate audio for STT
+        self._transcription_buffer = bytes()
+        self._is_speaking = False
+        self._silence_start = None
+        self._transcription_count = 0
+
+        # DEBUG: Save raw 48kHz audio for analysis
+        self._raw_48k_buffer = bytes()
+        self._call_id_short = None
+
     async def start(self):
         """Start reading audio from the track"""
         self._running = True
@@ -129,43 +196,177 @@ class AudioTrackReader:
                 await self._task
             except asyncio.CancelledError:
                 pass
+
+        # DEBUG: Save raw 48kHz audio for analysis
+        if len(self._raw_48k_buffer) > 0:
+            try:
+                call_id = self._call_id_short or "unknown"
+                filename = f"/app/audio_debug/raw_48k_{call_id}.wav"
+                wav_buffer = io.BytesIO()
+                with wave.open(wav_buffer, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(48000)
+                    wf.writeframes(self._raw_48k_buffer)
+                with open(filename, 'wb') as f:
+                    f.write(wav_buffer.getvalue())
+                duration = len(self._raw_48k_buffer) / (48000 * 2)
+                logger.info(f"📁 RAW 48kHz AUDIO SAVED: {filename} ({duration:.1f}s)")
+            except Exception as e:
+                logger.error(f"Error saving raw 48k audio: {e}")
+
         logger.info("Audio track reader stopped")
+
+    async def _transcribe_and_log(self, audio_data: bytes):
+        """Transcribe accumulated audio and log what user said"""
+        try:
+            self._transcription_count += 1
+            # Audio is at 16kHz after resampling
+            transcript = await transcribe_audio_sarvam(audio_data, sample_rate=16000)
+            logger.info(f"╔══════════════════════════════════════════════════════════════╗")
+            logger.info(f"║ 🎤 USER SPEECH #{self._transcription_count}: \"{transcript}\"")
+            logger.info(f"║ Audio: {len(audio_data)} bytes ({len(audio_data)/32:.1f}ms at 16kHz)")
+            logger.info(f"╚══════════════════════════════════════════════════════════════╝")
+        except Exception as e:
+            logger.error(f"Transcription error: {e}")
 
     async def _read_loop(self):
         """Main loop to read audio frames"""
+        frame_count = 0
         try:
             while self._running:
                 try:
                     # Receive frame from track
                     frame = await self.track.recv()
+                    frame_count += 1
 
-                    # Extract audio data from frame
-                    # aiortc AudioFrame has .to_ndarray() method
-                    if hasattr(frame, 'to_ndarray'):
-                        audio_array = frame.to_ndarray()
+                    # Extract audio data from frame using planes (raw bytes)
+                    # This is more reliable than to_ndarray() for some codecs
+                    if hasattr(frame, 'planes') and len(frame.planes) > 0:
+                        # Get raw bytes directly from the audio plane
+                        raw_audio_bytes = bytes(frame.planes[0])
 
-                        # Flatten if needed
-                        if len(audio_array.shape) > 1:
-                            audio_array = audio_array.flatten()
+                        # Determine format and convert to int16 array
+                        sample_rate = getattr(frame, 'sample_rate', 48000)
+                        fmt = getattr(frame, 'format', None)
+                        fmt_name = str(fmt.name) if fmt else 'unknown'
 
-                        # Convert to int16 if needed
-                        if audio_array.dtype != np.int16:
-                            if audio_array.dtype == np.float32 or audio_array.dtype == np.float64:
-                                audio_array = (audio_array * 32767).astype(np.int16)
-                            else:
-                                audio_array = audio_array.astype(np.int16)
+                        # Get channel info
+                        channels = getattr(frame.layout, 'channels', None)
+                        num_channels = len(channels) if channels else 1
+
+                        # Log frame info for debugging (first few frames)
+                        if frame_count <= 10:
+                            logger.info(f"[WEBRTC_FRAME] #{frame_count}: planes={len(frame.planes)}, "
+                                       f"plane_size={len(raw_audio_bytes)}, format={fmt_name}, "
+                                       f"sample_rate={sample_rate}, samples={frame.samples}, channels={num_channels}")
+
+                        # Convert based on format
+                        if 's16' in fmt_name:
+                            # Signed 16-bit PCM
+                            audio_array = np.frombuffer(raw_audio_bytes, dtype=np.int16)
+                        elif 's32' in fmt_name:
+                            # Signed 32-bit PCM - convert to 16-bit
+                            audio_array = np.frombuffer(raw_audio_bytes, dtype=np.int32)
+                            audio_array = (audio_array / 65536).astype(np.int16)
+                        elif 'flt' in fmt_name or 'f32' in fmt_name:
+                            # 32-bit float [-1.0, 1.0]
+                            audio_array = np.frombuffer(raw_audio_bytes, dtype=np.float32)
+                            audio_array = (audio_array * 32767).astype(np.int16)
+                        elif 'dbl' in fmt_name or 'f64' in fmt_name:
+                            # 64-bit float
+                            audio_array = np.frombuffer(raw_audio_bytes, dtype=np.float64)
+                            audio_array = (audio_array * 32767).astype(np.int16)
+                        else:
+                            # Default: assume 16-bit
+                            audio_array = np.frombuffer(raw_audio_bytes, dtype=np.int16)
+
+                        # Handle stereo -> mono conversion
+                        if num_channels == 2 and len(audio_array) > 0:
+                            # Deinterleave stereo (L R L R...) and average to mono
+                            left = audio_array[0::2]
+                            right = audio_array[1::2]
+                            audio_array = ((left.astype(np.int32) + right.astype(np.int32)) // 2).astype(np.int16)
+                            if frame_count <= 10:
+                                logger.info(f"[WEBRTC_STEREO] Converted stereo to mono: {len(left)*2} -> {len(audio_array)} samples")
+
+                        # Log audio level
+                        if frame_count <= 10:
+                            raw_max = np.max(np.abs(audio_array)) if len(audio_array) > 0 else 0
+                            logger.info(f"[WEBRTC_AUDIO] #{frame_count}: samples={len(audio_array)}, raw_max={raw_max}")
+
+                        # DEBUG: Save raw audio
+                        self._raw_48k_buffer += audio_array.tobytes()
+
+                        # Convert to float for processing
+                        audio_float = audio_array.astype(np.float32)
+
+                        # AMPLIFY: WhatsApp/WebRTC audio is very quiet after stereo->mono (raw levels 1-100)
+                        # Apply strong fixed gain since adaptive gain doesn't work well with such low levels
+                        max_val_before = np.max(np.abs(audio_float)) if len(audio_float) > 0 else 0
+
+                        # Use fixed high gain - WhatsApp stereo audio is extremely quiet
+                        # Target ~20000 amplitude for speech, gain of 500-1000x needed for raw levels of 20-40
+                        FIXED_GAIN = 800.0
+                        audio_float = audio_float * FIXED_GAIN
+
+                        # Soft clip to avoid harsh distortion
+                        audio_int16 = np.clip(audio_float, -32768, 32767).astype(np.int16)
+
+                        # Log audio level for first frames
+                        if frame_count <= 10:
+                            max_val_after = np.max(np.abs(audio_int16))
+                            logger.info(f"[WEBRTC_AUDIO] #{frame_count}: samples={len(audio_int16)}, before={max_val_before:.0f}, after={max_val_after}")
 
                         # Convert to bytes
-                        audio_bytes = audio_array.tobytes()
+                        audio_bytes = audio_int16.tobytes()
+                        
+                        # ===== REAL-TIME SPEECH DETECTION LOGGING =====
+                        max_val_after = np.max(np.abs(audio_int16)) if len(audio_int16) > 0 else 0
+                        if frame_count % 50 == 0 or max_val_after > 500:
+                            is_speech = "🗣️ SPEECH DETECTED!" if max_val_after > 500 else "silence"
+                            print(f"[FRAME {frame_count}] Audio level: {max_val_after:.0f} - {is_speech}")
 
-                        # Process and send to callback
+                        # Process and send to callback (resamples to 16kHz)
                         processed = self.audio_processor.process_webrtc_audio(audio_bytes)
                         if processed and self.on_audio:
                             await self.on_audio(processed)
 
+                        # === TRANSCRIPTION: Accumulate audio and detect speech ===
+                        SILENCE_THRESHOLD = 500  # Audio level below this is silence
+                        MIN_SPEECH_BYTES = 16000  # ~0.5 sec at 16kHz (16000 samples * 2 bytes)
+                        SILENCE_DURATION = 0.8  # Seconds of silence to trigger transcription
+
+                        max_val_after = np.max(np.abs(audio_int16)) if len(audio_int16) > 0 else 0
+
+                        if max_val_after > SILENCE_THRESHOLD:
+                            # Speech detected
+                            self._is_speaking = True
+                            self._silence_start = None
+                            # Accumulate the resampled (16kHz) audio for transcription
+                            if processed:
+                                self._transcription_buffer += processed
+                        else:
+                            # Silence detected
+                            if self._is_speaking:
+                                if self._silence_start is None:
+                                    self._silence_start = asyncio.get_event_loop().time()
+                                else:
+                                    silence_duration = asyncio.get_event_loop().time() - self._silence_start
+                                    # After enough silence, transcribe what was said
+                                    if silence_duration >= SILENCE_DURATION and len(self._transcription_buffer) >= MIN_SPEECH_BYTES:
+                                        self._is_speaking = False
+                                        # Transcribe in background
+                                        buffer_to_transcribe = self._transcription_buffer
+                                        self._transcription_buffer = bytes()
+                                        asyncio.create_task(self._transcribe_and_log(buffer_to_transcribe))
+
                 except Exception as e:
                     if self._running:
                         logger.error(f"Error reading audio frame: {e}")
+                        import traceback
+                        if frame_count <= 5:
+                            logger.error(traceback.format_exc())
                     await asyncio.sleep(0.01)
 
         except asyncio.CancelledError:
@@ -260,21 +461,42 @@ class CallSession:
         self.audio_processor = AudioProcessor()
         await self.audio_processor.start()
 
+        # Track audio from WhatsApp
+        self._whatsapp_audio_count = 0
+
         # Create track reader - sends audio to Gemini Live via WebSocket
         async def on_audio(pcm_data: bytes):
+            self._whatsapp_audio_count += 1
+
+            # Log audio levels (not just non-zero count)
+            if self._whatsapp_audio_count <= 10 or self._whatsapp_audio_count % 50 == 0:
+                audio_arr = np.frombuffer(pcm_data, dtype=np.int16)
+                max_level = np.max(np.abs(audio_arr)) if len(audio_arr) > 0 else 0
+                logger.info(f"[TO_GEMINI][{self.call_id}] #{self._whatsapp_audio_count}: {len(pcm_data)} bytes, max_level={max_level}")
+
             if self.agent:
                 await self.agent.send_audio(pcm_data)
 
         self.track_reader = AudioTrackReader(track, self.audio_processor, on_audio)
+        self.track_reader._call_id_short = self.call_id[:8] if len(self.call_id) > 8 else self.call_id
         await self.track_reader.start()
 
         logger.info(f"Audio processing started for call {self.call_id}")
 
     async def _handle_gemini_audio(self, audio_data: bytes, sample_rate: int = 24000):
         """Handle audio output from Gemini - sends to caller via WebRTC"""
+        # Track audio output
+        if not hasattr(self, '_gemini_out_count'):
+            self._gemini_out_count = 0
+        self._gemini_out_count += 1
+
         if self.output_track:
             await self.output_track.push_audio(audio_data, sample_rate)
-            logger.debug(f"Pushed {len(audio_data)} bytes at {sample_rate}Hz to output track")
+            if self._gemini_out_count <= 5 or self._gemini_out_count % 50 == 0:
+                logger.info(f"[GEMINI_TO_WEBRTC] #{self._gemini_out_count}: {len(audio_data)} bytes @ {sample_rate}Hz -> output_track")
+        else:
+            if self._gemini_out_count <= 5 or self._gemini_out_count % 50 == 0:
+                logger.warning(f"[GEMINI_TO_WEBRTC] #{self._gemini_out_count}: No output_track! Audio dropped: {len(audio_data)} bytes")
 
     async def start_agent(self):
         """Start the Gemini voice agent"""
@@ -387,7 +609,7 @@ class CallSession:
 
         # Stop Gemini agent
         if self.agent:
-            await stop_agent(self.call_id)
+            await self.agent.stop()  # Call stop directly on the agent object
 
         # Close peer connection
         if self.pc:

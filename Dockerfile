@@ -45,7 +45,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
     python-dotenv==1.0.0 \
     loguru==0.7.2 \
     av==12.3.0 \
-    aiortc==1.9.0
+    aiortc==1.9.0 \
+    aiohttp==3.9.0
 
 # Copy application code
 COPY . .

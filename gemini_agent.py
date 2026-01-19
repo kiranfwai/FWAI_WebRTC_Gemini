@@ -101,6 +101,17 @@ class GeminiWebSocketClient:
                         sample_rate = data.get("sample_rate", 24000)
                         if audio_hex and self.on_audio_output:
                             audio_bytes = bytes.fromhex(audio_hex)
+
+                            # Track audio receives
+                            if not hasattr(self, '_recv_count'):
+                                self._recv_count = 0
+                            self._recv_count += 1
+
+                            # Log first few and periodically
+                            if self._recv_count <= 5 or self._recv_count % 50 == 0:
+                                non_zero = sum(1 for b in audio_bytes[:100] if b != 0) if audio_bytes else 0
+                                logger.info(f"[AUDIO_FROM_GEMINI][{self.call_id}] #{self._recv_count}: {len(audio_bytes)} bytes @ {sample_rate}Hz, non_zero={non_zero}")
+
                             await self.on_audio_output(audio_bytes, sample_rate)
 
                     elif msg_type == "stopped":
@@ -131,6 +142,16 @@ class GeminiWebSocketClient:
         """
         if self._running and self.ws:
             try:
+                # Track audio sends
+                if not hasattr(self, '_send_count'):
+                    self._send_count = 0
+                self._send_count += 1
+
+                # Log first few and periodically
+                if self._send_count <= 5 or self._send_count % 50 == 0:
+                    non_zero = sum(1 for b in pcm_data[:100] if b != 0) if pcm_data else 0
+                    logger.info(f"[AUDIO_TO_GEMINI][{self.call_id}] #{self._send_count}: {len(pcm_data)} bytes, non_zero_first_100={non_zero}")
+
                 message = {
                     "type": "audio",
                     "data": pcm_data.hex()

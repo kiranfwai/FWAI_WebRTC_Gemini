@@ -50,15 +50,17 @@ class AudioProcessor:
         self,
         audio_data: bytes,
         from_rate: int,
-        to_rate: int
+        to_rate: int,
+        amplify: bool = False  # Disabled - amplification now done in webrtc_handler
     ) -> bytes:
         """
-        Resample audio from one sample rate to another
+        Resample audio from one sample rate to another with improved quality
 
         Args:
             audio_data: Input PCM audio bytes (16-bit signed)
             from_rate: Source sample rate
             to_rate: Target sample rate
+            amplify: Whether to amplify low-level audio (disabled - done earlier in pipeline)
 
         Returns:
             Resampled PCM audio bytes
@@ -67,16 +69,41 @@ class AudioProcessor:
             # Convert bytes to numpy array
             audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
 
+            # Log audio levels periodically (no amplification here - done in webrtc_handler)
+            if len(audio_array) > 0:
+                max_val = np.max(np.abs(audio_array))
+
+                if not hasattr(self, '_resample_count'):
+                    self._resample_count = 0
+                self._resample_count += 1
+
+                if self._resample_count <= 5 or self._resample_count % 100 == 0:
+                    logger.info(f"[RESAMPLE] #{self._resample_count}: max={max_val:.0f}, {from_rate}Hz -> {to_rate}Hz")
+
             # Calculate resampling ratio
             ratio = to_rate / from_rate
 
             # Number of output samples
             num_samples = int(len(audio_array) * ratio)
 
-            # Resample using scipy
-            resampled = signal.resample(audio_array, num_samples)
+            # Use polyphase resampling for better quality (less aliasing)
+            if from_rate != to_rate:
+                # Calculate GCD for rational resampling
+                from math import gcd
+                g = gcd(to_rate, from_rate)
+                up = to_rate // g
+                down = from_rate // g
 
-            # Convert back to int16
+                # Use resample_poly for better quality when ratio is reasonable
+                if up <= 6 and down <= 6:
+                    resampled = signal.resample_poly(audio_array, up, down)
+                else:
+                    # Fall back to regular resample for extreme ratios
+                    resampled = signal.resample(audio_array, num_samples)
+            else:
+                resampled = audio_array
+
+            # Convert back to int16 with proper clipping
             resampled_int16 = np.clip(resampled, -32768, 32767).astype(np.int16)
 
             return resampled_int16.tobytes()

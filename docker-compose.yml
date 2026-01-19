@@ -12,9 +12,11 @@ services:
       - "8003:8003"
     environment:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - SARVAM_API_KEY=${SARVAM_API_KEY}
       - GEMINI_LIVE_PORT=8003
     volumes:
       - ./FAWI_Call_BOT.txt:/app/FAWI_Call_BOT.txt:ro
+      - ./audio_debug:/app/audio_debug
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s = socket.socket(); s.connect(('localhost', 8003)); s.close()"]
@@ -37,6 +39,7 @@ services:
       - META_ACCESS_TOKEN=${META_ACCESS_TOKEN}
       - META_VERIFY_TOKEN=${META_VERIFY_TOKEN}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - SARVAM_API_KEY=${SARVAM_API_KEY}
       - PORT=3000
       - HOST=0.0.0.0
       - DEBUG=true
