@@ -5,13 +5,68 @@ Connects to gemini-live-service.py (port 8003) for voice conversations
 
 import asyncio
 import json
+import os
+import io
+import wave
 from typing import Optional, Callable, Awaitable, Dict, Any
 from loguru import logger
+import numpy as np
+import aiohttp
 
 import websockets
 from websockets.client import WebSocketClientProtocol
 
 from config import config
+
+# Unified per-call flow log directory
+CALL_FLOW_LOG_DIR = "/app/audio_debug/call_flows"
+
+def log_call_flow(call_id: str, stage: str, direction: str, content: str):
+    """Log to unified per-call flow file"""
+    try:
+        from datetime import datetime
+        os.makedirs(CALL_FLOW_LOG_DIR, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        short_id = call_id[:8] if len(call_id) > 8 else call_id
+        log_line = f"[{timestamp}] [{stage}] [{direction}] {content}\n"
+        emoji = "🎤" if direction == "USER" else "🤖"
+        print(f"{emoji} [{short_id}] {log_line.strip()}")
+        log_file = f"{CALL_FLOW_LOG_DIR}/call_{short_id}.log"
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(log_line)
+    except Exception as e:
+        logger.error(f"Error logging call flow: {e}")
+
+
+async def transcribe_audio_sarvam(audio_data: bytes, sample_rate: int = 16000) -> str:
+    """Transcribe audio using Sarvam AI STT"""
+    api_key = os.getenv("SARVAM_API_KEY")
+    if not api_key:
+        return "[No Sarvam API key]"
+    try:
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(audio_data)
+        wav_buffer.seek(0)
+        wav_bytes = wav_buffer.read()
+        url = "https://api.sarvam.ai/speech-to-text"
+        form_data = aiohttp.FormData()
+        form_data.add_field('file', wav_bytes, filename='audio.wav', content_type='audio/wav')
+        form_data.add_field('model', 'saarika:v2.5')
+        form_data.add_field('language_code', 'en-IN')
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=form_data, headers={"api-subscription-key": api_key}, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return result.get("transcript", "") or "[silence]"
+                return f"[STT error: {response.status}]"
+    except asyncio.TimeoutError:
+        return "[STT timeout]"
+    except Exception as e:
+        return f"[STT error: {str(e)[:50]}]"
 
 
 class GeminiWebSocketClient:
@@ -39,6 +94,11 @@ class GeminiWebSocketClient:
         self._running = False
         self._receive_task: Optional[asyncio.Task] = None
         self._connected = asyncio.Event()
+
+        # Transcription buffer for Main Server level logging
+        self._transcription_buffer = bytes()
+        self._is_speaking = False
+        self._silence_start = None
 
     async def connect(self) -> bool:
         """Connect to gemini-live-service.py"""
@@ -157,8 +217,42 @@ class GeminiWebSocketClient:
                     "data": pcm_data.hex()
                 }
                 await self.ws.send(json.dumps(message))
+
+                # === MAIN SERVER LEVEL TRANSCRIPTION ===
+                audio_array = np.frombuffer(pcm_data, dtype=np.int16)
+                max_level = np.max(np.abs(audio_array)) if len(audio_array) > 0 else 0
+                SPEECH_THRESHOLD = 1000
+                SILENCE_DURATION = 0.8
+                MIN_SPEECH_BYTES = 8000
+
+                if max_level > SPEECH_THRESHOLD:
+                    self._is_speaking = True
+                    self._silence_start = None
+                    self._transcription_buffer += pcm_data
+                else:
+                    if self._is_speaking:
+                        if self._silence_start is None:
+                            self._silence_start = asyncio.get_event_loop().time()
+                        else:
+                            silence_duration = asyncio.get_event_loop().time() - self._silence_start
+                            if silence_duration >= SILENCE_DURATION and len(self._transcription_buffer) >= MIN_SPEECH_BYTES:
+                                audio_to_transcribe = self._transcription_buffer
+                                self._transcription_buffer = bytes()
+                                self._is_speaking = False
+                                self._silence_start = None
+                                asyncio.create_task(self._transcribe_main_server(audio_to_transcribe))
+
             except Exception as e:
                 logger.error(f"Error sending audio: {e}")
+
+    async def _transcribe_main_server(self, audio_data: bytes):
+        """Transcribe at Main Server level before sending to Gemini Live service"""
+        try:
+            transcript = await transcribe_audio_sarvam(audio_data, sample_rate=16000)
+            if transcript and not transcript.startswith("["):
+                log_call_flow(self.call_id, "MAIN_SERVER", "USER", transcript)
+        except Exception as e:
+            logger.error(f"Main server transcription error: {e}")
 
     async def stop(self):
         """Stop and disconnect"""

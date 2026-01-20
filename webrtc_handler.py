@@ -49,7 +49,7 @@ async def transcribe_audio_sarvam(audio_data: bytes, sample_rate: int = 16000) -
         form_data = aiohttp.FormData()
         form_data.add_field('file', wav_bytes, filename='audio.wav', content_type='audio/wav')
         form_data.add_field('model', 'saarika:v2.5')
-        form_data.add_field('language_code', 'hi-IN')  # Hindi-English mix
+        form_data.add_field('language_code', 'en-IN')  # English (India)
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -154,6 +154,45 @@ class AudioOutputTrack(MediaStreamTrack):
                 logger.info(f"[OUTPUT_TRACK] push #{self._push_count}: {len(audio_data)}b in -> {len(audio_resampled)*2}b buffered, total buffer: {len(self._buffer)} bytes")
 
 
+# Unified per-call flow log directory
+CALL_FLOW_LOG_DIR = "/app/audio_debug/call_flows"
+
+def log_call_flow(call_id: str, stage: str, direction: str, content: str):
+    """
+    Log to unified per-call flow file
+
+    Args:
+        call_id: Call identifier
+        stage: WEBRTC, MAIN_SERVER, GEMINI_IN, GEMINI_OUT
+        direction: USER or AGENT
+        content: What was said/sent
+    """
+    try:
+        import os
+        from datetime import datetime
+
+        # Ensure directory exists
+        os.makedirs(CALL_FLOW_LOG_DIR, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        short_id = call_id[:8] if len(call_id) > 8 else call_id
+
+        # Format: [TIMESTAMP] [STAGE] [DIRECTION] content
+        log_line = f"[{timestamp}] [{stage}] [{direction}] {content}\n"
+
+        # Print to console with emoji
+        emoji = "🎤" if direction == "USER" else "🤖"
+        print(f"{emoji} [{short_id}] {log_line.strip()}")
+
+        # Write to per-call log file
+        log_file = f"{CALL_FLOW_LOG_DIR}/call_{short_id}.log"
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(log_line)
+
+    except Exception as e:
+        logger.error(f"Error logging call flow: {e}")
+
+
 class AudioTrackReader:
     """
     Reads audio from a WebRTC MediaStreamTrack and sends to Gemini
@@ -230,6 +269,20 @@ class AudioTrackReader:
         except Exception as e:
             logger.error(f"Transcription error: {e}")
 
+    async def _transcribe_webrtc_audio(self, call_id: str, audio_data: bytes):
+        """Transcribe audio at WebRTC level and log to unified flow file"""
+        try:
+            # Audio is at 16kHz after resampling
+            transcript = await transcribe_audio_sarvam(audio_data, sample_rate=16000)
+            if transcript and not transcript.startswith("["):
+                # Log to unified per-call flow file
+                log_call_flow(call_id, "WEBRTC", "USER", transcript)
+                logger.info(f"[WEBRTC_STT] call={call_id}: \"{transcript}\"")
+            else:
+                logger.debug(f"[WEBRTC_STT] call={call_id}: {transcript}")
+        except Exception as e:
+            logger.error(f"WebRTC transcription error: {e}")
+
     async def _read_loop(self):
         """Main loop to read audio frames"""
         frame_count = 0
@@ -305,12 +358,12 @@ class AudioTrackReader:
                         # Apply strong fixed gain since adaptive gain doesn't work well with such low levels
                         max_val_before = np.max(np.abs(audio_float)) if len(audio_float) > 0 else 0
 
-                        # Use fixed high gain - WhatsApp stereo audio is extremely quiet
-                        # Target ~20000 amplitude for speech, gain of 500-1000x needed for raw levels of 20-40
-                        FIXED_GAIN = 800.0
+                        # Use moderate gain - too high causes clipping/distortion
+                        # Reduced from 800 to 300 to prevent 32767 clipping
+                        FIXED_GAIN = 300.0
                         audio_float = audio_float * FIXED_GAIN
 
-                        # Soft clip to avoid harsh distortion
+                        # Clip to valid range
                         audio_int16 = np.clip(audio_float, -32768, 32767).astype(np.int16)
 
                         # Log audio level for first frames
@@ -332,7 +385,44 @@ class AudioTrackReader:
                         if processed and self.on_audio:
                             await self.on_audio(processed)
 
-                        # Note: Transcription is handled in gemini-live-service.py to avoid duplicates
+                        # === WEBRTC LEVEL TRANSCRIPTION ===
+                        # Accumulate audio for transcription at WebRTC level
+                        max_level = np.max(np.abs(audio_int16)) if len(audio_int16) > 0 else 0
+                        SPEECH_THRESHOLD = 1000
+                        SILENCE_DURATION = 0.8  # seconds
+                        MIN_SPEECH_BYTES = 8000  # ~0.25 seconds at 16kHz
+                        MAX_SPEECH_BYTES = 480000  # ~15 seconds at 16kHz (Sarvam limit is 30s)
+
+                        if max_level > SPEECH_THRESHOLD:
+                            # Speech detected
+                            self._is_speaking = True
+                            self._silence_start = None
+                            self._transcription_buffer += processed  # Add 16kHz audio
+
+                            # If buffer exceeds max, transcribe immediately
+                            if len(self._transcription_buffer) >= MAX_SPEECH_BYTES:
+                                audio_to_transcribe = self._transcription_buffer
+                                self._transcription_buffer = bytes()
+                                call_id = self._call_id_short or "unknown"
+                                asyncio.create_task(self._transcribe_webrtc_audio(call_id, audio_to_transcribe))
+                        else:
+                            # Silence
+                            if self._is_speaking:
+                                if self._silence_start is None:
+                                    self._silence_start = asyncio.get_event_loop().time()
+                                else:
+                                    silence_duration = asyncio.get_event_loop().time() - self._silence_start
+                                    if silence_duration >= SILENCE_DURATION and len(self._transcription_buffer) >= MIN_SPEECH_BYTES:
+                                        # Transcribe accumulated speech
+                                        self._transcription_count += 1
+                                        audio_to_transcribe = self._transcription_buffer
+                                        self._transcription_buffer = bytes()
+                                        self._is_speaking = False
+                                        self._silence_start = None
+
+                                        # Transcribe in background
+                                        call_id = self._call_id_short or "unknown"
+                                        asyncio.create_task(self._transcribe_webrtc_audio(call_id, audio_to_transcribe))
 
                 except Exception as e:
                     if self._running:
@@ -366,6 +456,10 @@ class CallSession:
         self.phone_number = phone_number
         self.caller_name = caller_name
         self.is_outbound = is_outbound
+
+        # Log call start to unified flow file
+        call_type = "OUTBOUND" if is_outbound else "INBOUND"
+        log_call_flow(call_id, "CALL_START", "SYSTEM", f"{call_type} call to {caller_name} ({phone_number})")
 
         # WebRTC
         self.pc: Optional[RTCPeerConnection] = None
@@ -567,6 +661,9 @@ class CallSession:
         """Stop the call session"""
         logger.info(f"Stopping call session {self.call_id}")
         self._running = False
+
+        # Log call end to unified flow file
+        log_call_flow(self.call_id, "CALL_END", "SYSTEM", f"Call ended with {self.caller_name}")
 
         # Stop track reader
         if self.track_reader:

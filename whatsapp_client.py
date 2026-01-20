@@ -1,5 +1,6 @@
 """
 WhatsApp Business API Client for Voice Calls and Messages
+With automatic token refresh on 401 errors
 """
 
 import httpx
@@ -7,15 +8,47 @@ from loguru import logger
 from typing import Optional, Dict, Any
 from config import config
 
+# Import token manager for auto-refresh
+try:
+    from token_manager import token_manager, get_access_token, handle_token_error
+    HAS_TOKEN_MANAGER = True
+except ImportError:
+    HAS_TOKEN_MANAGER = False
+    logger.warning("Token manager not available - token refresh disabled")
+
 
 class WhatsAppClient:
-    """Client for WhatsApp Business API"""
+    """Client for WhatsApp Business API with automatic token refresh"""
 
     def __init__(self):
+        self._update_headers()
+
+    def _update_headers(self):
+        """Update headers with current token"""
+        token = config.meta_access_token
         self.headers = {
-            "Authorization": f"Bearer {config.meta_access_token}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
+
+    async def _refresh_token_and_retry(self) -> bool:
+        """Attempt to refresh token after 401 error"""
+        if not HAS_TOKEN_MANAGER:
+            logger.error("Token manager not available - cannot refresh token")
+            return False
+
+        logger.info("Attempting to refresh Meta access token...")
+        new_token = await handle_token_error()
+
+        if new_token:
+            # Update config and headers
+            config.meta_access_token = new_token
+            self._update_headers()
+            logger.info("Token refreshed successfully!")
+            return True
+
+        logger.error("Failed to refresh token")
+        return False
 
     async def make_call(
         self,
@@ -47,6 +80,10 @@ class WhatsAppClient:
         if ice_candidates:
             payload["session"]["ice_candidates"] = ice_candidates
 
+        return await self._make_call_with_retry(payload)
+
+    async def _make_call_with_retry(self, payload: dict, retry_count: int = 0) -> Dict[str, Any]:
+        """Make call with automatic token refresh on 401"""
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -60,6 +97,13 @@ class WhatsAppClient:
                 logger.info(f"Call initiated successfully: {result}")
                 return {"success": True, **result}
         except httpx.HTTPStatusError as e:
+            # Handle 401 Unauthorized - try token refresh
+            if e.response.status_code == 401 and retry_count == 0:
+                logger.warning("Got 401 Unauthorized - attempting token refresh...")
+                if await self._refresh_token_and_retry():
+                    logger.info("Retrying call after token refresh...")
+                    return await self._make_call_with_retry(payload, retry_count=1)
+
             logger.error(f"HTTP error making call: {e.response.text}")
             return {"success": False, "error": str(e), "details": e.response.text}
         except Exception as e:

@@ -1,32 +1,31 @@
 version: '3.8'
 
+# STT-Only mode - Just transcribes what user says (no Gemini AI)
+# Usage: docker-compose -f docker-compose.stt-only.yml up -d
+
 services:
-  # Gemini Live Service (port 8003)
-  # Must start first - main server connects to this
+  # STT-Only Service (replaces gemini-live)
   gemini-live:
     build:
       context: .
-      dockerfile: Dockerfile.gemini
-    container_name: gemini-live-service
+      dockerfile: Dockerfile.stt-only
+    container_name: stt-only-service
     ports:
       - "8003:8003"
     environment:
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - SARVAM_API_KEY=${SARVAM_API_KEY}
       - GEMINI_LIVE_PORT=8003
     volumes:
-      - ./FAWI_Call_BOT.txt:/app/FAWI_Call_BOT.txt:ro
       - ./audio_debug:/app/audio_debug
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s = socket.socket(); s.settimeout(3); s.connect(('localhost', 8003)); s.close()"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 20s
+      test: ["CMD", "python", "-c", "import socket; s = socket.socket(); s.connect(('localhost', 8003)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
-  # Main Server (port 3000)
-  # Handles WhatsApp WebRTC and connects to gemini-live
+  # Main Server (unchanged)
   main-server:
     build:
       context: .
@@ -38,14 +37,11 @@ services:
       - PHONE_NUMBER_ID=${PHONE_NUMBER_ID}
       - META_ACCESS_TOKEN=${META_ACCESS_TOKEN}
       - META_VERIFY_TOKEN=${META_VERIFY_TOKEN}
-      - META_APP_ID=${META_APP_ID}
-      - META_APP_SECRET=${META_APP_SECRET}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - SARVAM_API_KEY=${SARVAM_API_KEY}
       - PORT=3000
       - HOST=0.0.0.0
       - DEBUG=true
-      # Connect to gemini-live service in Docker network
       - GEMINI_LIVE_HOST=gemini-live
       - GEMINI_LIVE_PORT=8003
     depends_on:
