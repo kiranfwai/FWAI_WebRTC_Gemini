@@ -281,6 +281,82 @@ async def api_terminate_call(call_id: str):
 # Main Entry Point
 # ============================================================================
 
+# ============================================================================
+# Plivo Endpoints
+# ============================================================================
+
+@app.post("/plivo/answer")
+async def plivo_answer(request: Request):
+    """Handle Plivo call answer"""
+    from fastapi.responses import Response
+    
+    body = await request.form()
+    call_uuid = body.get("CallUUID", "")
+    
+    logger.info(f"Plivo call answered: {call_uuid}")
+    
+    callback_url = f"{config.plivo_callback_url}/plivo/speech"
+    
+    xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Speak voice="Polly.Aditi">Hello! I am your AI assistant. Please speak after the beep.</Speak>
+    <GetInput action="{callback_url}" method="POST" inputType="speech" executionTimeout="30" speechEndTimeout="2">
+        <Speak voice="Polly.Aditi">I am listening.</Speak>
+    </GetInput>
+    <Speak voice="Polly.Aditi">I did not hear anything. Goodbye!</Speak>
+</Response>"""
+    
+    return Response(content=xml_response, media_type="application/xml")
+
+
+@app.post("/plivo/speech")
+async def plivo_speech(request: Request):
+    """Handle speech input from Plivo"""
+    from fastapi.responses import Response
+    import google.generativeai as genai
+    
+    body = await request.form()
+    call_uuid = body.get("CallUUID", "")
+    speech = body.get("Speech", "")
+    
+    logger.info(f"Plivo speech received: {speech}")
+    
+    # Call Gemini for response
+    try:
+        genai.configure(api_key=config.google_api_key)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content(f"You are a helpful voice assistant. Respond briefly to: {speech}")
+        reply = response.text.replace('"', "''").strip()
+    except Exception as e:
+        logger.error(f"Gemini error: {e}")
+        reply = "Sorry, I could not process your request."
+    
+    callback_url = f"{config.plivo_callback_url}/plivo/speech"
+    
+    xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Speak voice="Polly.Aditi">{reply}</Speak>
+    <GetInput action="{callback_url}" method="POST" inputType="speech" executionTimeout="30" speechEndTimeout="2">
+        <Speak voice="Polly.Aditi">What else can I help you with?</Speak>
+    </GetInput>
+    <Speak voice="Polly.Aditi">Thank you for calling. Goodbye!</Speak>
+</Response>"""
+    
+    return Response(content=xml_response, media_type="application/xml")
+
+
+@app.post("/plivo/hangup")
+async def plivo_hangup(request: Request):
+    """Handle Plivo call hangup"""
+    body = await request.form()
+    call_uuid = body.get("CallUUID", "")
+    duration = body.get("Duration", "0")
+    
+    logger.info(f"Plivo call ended: {call_uuid}, duration: {duration}s")
+    
+    return JSONResponse(content={"status": "ok"})
+
+
 if __name__ == "__main__":
     import uvicorn
 
