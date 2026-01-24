@@ -1,45 +1,41 @@
-"""
-Plivo + Gemini 2.5 Live Native Audio Stream Handler
-
-Bridges Plivo bidirectional audio stream with Gemini 2.5 Live API
-for real-time voice conversations using Gemini native TTS.
-"""
-
+# Plivo + Google Live API Stream Handler
 import asyncio
 import json
 import base64
-import audioop
-from typing import Dict, Optional
+from typing import Dict
 from loguru import logger
 from datetime import datetime
 from pathlib import Path
-
-from google import genai
-from google.genai import types
-
+import websockets
 from src.core.config import config
 
+# Load FWAI prompt
+def load_fwai_prompt():
+    try:
+        prompts_file = Path(__file__).parent.parent.parent / "prompts.json"
+        with open(prompts_file) as f:
+            prompts = json.load(f)
+            return prompts.get("FWAI_Core", {}).get("prompt", "You are a helpful AI assistant.")
+    except:
+        return "You are a helpful AI assistant."
+
+FWAI_PROMPT = load_fwai_prompt()
 
 class PlivoGeminiSession:
-    """
-    Manages a single call session bridging Plivo audio with Gemini 2.5 Live.
-
-    Audio Flow:
-    - Plivo sends mulaw 8kHz audio -> convert to PCM 16kHz -> Gemini Live
-    - Gemini Live sends PCM 24kHz audio -> convert to mulaw 8kHz -> Plivo
-    """
-
     def __init__(self, call_uuid: str, caller_phone: str, plivo_ws):
         self.call_uuid = call_uuid
         self.caller_phone = caller_phone
         self.plivo_ws = plivo_ws
-        self.gemini_session = None
+        self.goog_live_ws = None
         self.is_active = False
+        self.start_streaming = False
+        self.stream_id = ""
         self._session_task = None
-        self._audio_queue = asyncio.Queue()
+        self.BUFFER_SIZE = 1600  # Reduced for lower latency (was 3200)
+        self.inbuffer = bytearray(b"")
+        self.greeting_sent = False
 
-    def _save_transcript(self, role: str, text: str):
-        """Save transcript entry"""
+    def _save_transcript(self, role, text):
         if not config.enable_transcripts:
             return
         try:
@@ -49,264 +45,150 @@ class PlivoGeminiSession:
             timestamp = datetime.now().strftime("%H:%M:%S")
             with open(transcript_file, "a") as f:
                 f.write(f"[{timestamp}] {role}: {text}\n")
+            logger.info(f"TRANSCRIPT [{role}]: {text}")
         except Exception as e:
             logger.error(f"Error saving transcript: {e}")
 
     async def start(self):
-        """Initialize Gemini 2.5 Live session"""
         try:
-            logger.info(f"Starting Gemini 2.5 Live session for call {self.call_uuid}")
+            logger.info(f"Starting Google Live API session for call {self.call_uuid}")
             self.is_active = True
             self._save_transcript("SYSTEM", "Call started")
-
-            # Start the session manager task
-            self._session_task = asyncio.create_task(self._run_gemini_session())
-
+            self._session_task = asyncio.create_task(self._run_google_live_session())
             return True
-
         except Exception as e:
-            logger.error(f"Failed to start Gemini session: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Failed to start session: {e}")
             return False
 
-    async def _run_gemini_session(self):
-        """Run the Gemini Live session within async context manager"""
+    async def _run_google_live_session(self):
+        url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={config.google_api_key}"
         try:
-            # Initialize Gemini client
-            client = genai.Client(api_key=config.google_api_key)
-
-            # System instruction for the AI agent
-            system_instruction = """You are Vishnu, a friendly AI counselor at Freedom with AI.
-
-                    Your role:
-                    - Help people understand how AI skills can elevate their career
-                    - Be warm, conversational, and professional
-                    - Ask questions to understand their background and goals
-                    - Keep responses concise (1-2 sentences) for natural phone conversation
-                    - Listen carefully and respond to what they actually say
-
-                    Start by greeting them warmly and asking about their experience with AI."""
-
-            # Configure Gemini Live with native audio
-            live_config = types.LiveConnectConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            voice_name="Kore"
-                        )
-                    )
-                ),
-                system_instruction=types.Content(
-                    parts=[types.Part(text=system_instruction)]
-                ),
-            )
-
-            # Connect to Gemini 2.5 Live using async context manager
-            async with client.aio.live.connect(
-                model="gemini-2.0-flash-live-001",
-                config=live_config
-            ) as session:
-                self.gemini_session = session
-                logger.info(f"Gemini 2.5 Live connected for call {self.call_uuid}")
-
-                # Send initial greeting trigger
-                await session.send_client_content(
-                    turns=[
-                        types.Content(
-                            role="user",
-                            parts=[types.Part(text="[Call connected. Greet the caller warmly.]")]
-                        )
-                    ],
-                    turn_complete=True
-                )
-
-                # Start tasks for receiving from Gemini and sending audio
-                receive_task = asyncio.create_task(self._receive_from_gemini())
-                send_task = asyncio.create_task(self._send_audio_to_gemini())
-
-                # Wait until session ends
-                while self.is_active:
-                    await asyncio.sleep(0.1)
-
-                # Cancel tasks
-                receive_task.cancel()
-                send_task.cancel()
-                try:
-                    await receive_task
-                except asyncio.CancelledError:
-                    pass
-                try:
-                    await send_task
-                except asyncio.CancelledError:
-                    pass
-
-        except asyncio.CancelledError:
-            pass
+            async with websockets.connect(url) as ws:
+                self.goog_live_ws = ws
+                logger.info("Connected to Google Live API")
+                await self._send_session_setup()
+                async for message in ws:
+                    if not self.is_active:
+                        break
+                    await self._receive_from_google(message)
         except Exception as e:
-            logger.error(f"Gemini session error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Google Live error: {e}")
         finally:
-            self.gemini_session = None
-            logger.info(f"Gemini session ended for call {self.call_uuid}")
+            self.goog_live_ws = None
+            logger.info("Google Live session ended")
 
-    async def _send_audio_to_gemini(self):
-        """Send queued audio to Gemini"""
+    async def _send_session_setup(self):
+        msg = {
+            "setup": {
+                "model": "models/gemini-2.0-flash-exp",
+                "generation_config": {
+                    "response_modalities": "audio",
+                    "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": "Charon"}}}
+                },
+                "system_instruction": {"parts": [{"text": FWAI_PROMPT}]},
+                "tools": {"google_search": {}}
+            }
+        }
+        await self.goog_live_ws.send(json.dumps(msg))
+        logger.info("Sent session setup with FWAI prompt")
+
+    async def _send_initial_greeting(self):
+        """Send initial trigger to make AI greet immediately"""
+        if self.greeting_sent or not self.goog_live_ws:
+            return
+        self.greeting_sent = True
+        msg = {
+            "client_content": {
+                "turns": [{
+                    "role": "user",
+                    "parts": [{"text": "Start"}]
+                }],
+                "turn_complete": True
+            }
+        }
+        await self.goog_live_ws.send(json.dumps(msg))
+        logger.info("Sent initial greeting trigger")
+
+
+
+    async def _receive_from_google(self, message):
         try:
-            while self.is_active:
-                try:
-                    pcm_data = await asyncio.wait_for(self._audio_queue.get(), timeout=0.5)
-                    if self.gemini_session:
-                        await self.gemini_session.send_realtime_input(
-                            media=types.Blob(data=pcm_data, mime_type="audio/pcm")
-                        )
-                except asyncio.TimeoutError:
-                    continue
-        except asyncio.CancelledError:
-            pass
+            resp = json.loads(message)
+            if "setupComplete" in resp:
+                logger.info("Google Live setup complete - AI Ready")
+                self.start_streaming = True
+                self._save_transcript("SYSTEM", "AI ready")
+                # Trigger immediate greeting
+                await self._send_initial_greeting()
+            if "serverContent" in resp:
+                sc = resp["serverContent"]
+                if "interrupted" in sc:
+                    await self.plivo_ws.send_text(json.dumps({"event": "clearAudio", "stream_id": self.stream_id}))
+                if "modelTurn" in sc:
+                    parts = sc.get("modelTurn", {}).get("parts", [])
+                    for p in parts:
+                        if p.get("inlineData", {}).get("data"):
+                            audio = p["inlineData"]["data"]
+                            await self.plivo_ws.send_text(json.dumps({
+                                "event": "playAudio",
+                                "media": {"contentType": "audio/x-l16", "sampleRate": 24000, "payload": audio}
+                            }))
+                        if p.get("text"):
+                            self._save_transcript("VISHNU", p["text"])
         except Exception as e:
-            logger.error(f"Error sending audio to Gemini: {e}")
+            logger.error(f"Error: {e}")
 
-    async def _receive_from_gemini(self):
-        """Receive audio and text from Gemini Live and send to Plivo"""
+    async def handle_plivo_audio(self, audio_b64):
         try:
-            async for response in self.gemini_session.receive():
-                if not self.is_active:
-                    break
-
-                # Handle audio data
-                if response.data:
-                    pcm_data = response.data
-                    mulaw_data = self._pcm_to_mulaw(pcm_data)
-                    await self._send_audio_to_plivo(mulaw_data)
-
-                # Handle text for transcripts
-                if response.text:
-                    logger.info(f"VISHNU: {response.text}")
-                    self._save_transcript("VISHNU", response.text)
-
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error(f"Error receiving from Gemini: {e}")
-            import traceback
-            traceback.print_exc()
-
-    def _pcm_to_mulaw(self, pcm_data: bytes) -> bytes:
-        """Convert PCM 24kHz 16-bit (Gemini output) to mulaw 8kHz for Plivo"""
-        try:
-            # Gemini outputs 24kHz, Plivo needs 8kHz mulaw
-            downsampled = audioop.ratecv(pcm_data, 2, 1, 24000, 8000, None)[0]
-            mulaw_data = audioop.lin2ulaw(downsampled, 2)
-            return mulaw_data
-        except Exception as e:
-            logger.error(f"Audio conversion error: {e}")
-            return b""
-
-    def _mulaw_to_pcm(self, mulaw_data: bytes) -> bytes:
-        """Convert mulaw 8kHz to PCM 16kHz 16-bit for Gemini"""
-        try:
-            pcm_8k = audioop.ulaw2lin(mulaw_data, 2)
-            pcm_16k = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)[0]
-            return pcm_16k
-        except Exception as e:
-            logger.error(f"Audio conversion error: {e}")
-            return b""
-
-    async def _send_audio_to_plivo(self, mulaw_data: bytes):
-        """Send audio to Plivo WebSocket"""
-        try:
-            if self.plivo_ws and self.is_active:
-                audio_b64 = base64.b64encode(mulaw_data).decode("utf-8")
-                message = {
-                    "event": "playAudio",
-                    "media": {
-                        "contentType": "audio/x-mulaw",
-                        "sampleRate": 8000,
-                        "payload": audio_b64
-                    }
-                }
-                await self.plivo_ws.send_text(json.dumps(message))
-        except Exception as e:
-            logger.error(f"Error sending audio to Plivo: {e}")
-
-    async def handle_plivo_audio(self, audio_b64: str):
-        """Handle incoming audio from Plivo"""
-        try:
-            if not self.is_active:
+            if not self.is_active or not self.start_streaming or not self.goog_live_ws:
                 return
-
-            mulaw_data = base64.b64decode(audio_b64)
-            pcm_data = self._mulaw_to_pcm(mulaw_data)
-
-            # Queue audio for sending to Gemini
-            await self._audio_queue.put(pcm_data)
-
+            chunk = base64.b64decode(audio_b64)
+            self.inbuffer.extend(chunk)
+            while len(self.inbuffer) >= self.BUFFER_SIZE:
+                ac = self.inbuffer[:self.BUFFER_SIZE]
+                msg = {"realtime_input": {"media_chunks": [{"mime_type": "audio/pcm;rate=16000", "data": base64.b64encode(bytes(ac)).decode()}]}}
+                await self.goog_live_ws.send(json.dumps(msg))
+                self.inbuffer = self.inbuffer[self.BUFFER_SIZE:]
         except Exception as e:
-            logger.error(f"Error handling Plivo audio: {e}")
+            logger.error(f"Audio error: {e}")
 
-    async def handle_plivo_message(self, message: dict):
-        """Handle messages from Plivo WebSocket"""
+    async def handle_plivo_message(self, message):
         event = message.get("event")
-
         if event == "media":
-            media = message.get("media", {})
-            payload = media.get("payload", "")
+            payload = message.get("media", {}).get("payload", "")
             if payload:
                 await self.handle_plivo_audio(payload)
-
         elif event == "start":
-            logger.info(f"Plivo stream started for call {self.call_uuid}")
-
+            self.stream_id = message.get("start", {}).get("streamId", "")
+            logger.info(f"Stream started: {self.stream_id}")
         elif event == "stop":
-            logger.info(f"Plivo stream stopped for call {self.call_uuid}")
             await self.stop()
 
-        elif event == "dtmf":
-            digit = message.get("digit", "")
-            logger.info(f"DTMF received: {digit}")
-
     async def stop(self):
-        """Stop the session"""
-        logger.info(f"Stopping session for call {self.call_uuid}")
+        logger.info(f"Stopping session for {self.call_uuid}")
         self.is_active = False
-
-        # Cancel the session task (this will close the Gemini session via context manager)
+        if self.goog_live_ws:
+            try:
+                await self.goog_live_ws.close()
+            except:
+                pass
         if self._session_task:
             self._session_task.cancel()
-            try:
-                await self._session_task
-            except asyncio.CancelledError:
-                pass
-
         self._save_transcript("SYSTEM", "Call ended")
-        logger.info(f"Session stopped for call {self.call_uuid}")
 
-
-# Active sessions
 _sessions: Dict[str, PlivoGeminiSession] = {}
 
-
-async def create_session(call_uuid: str, caller_phone: str, plivo_ws):
-    """Create a new Plivo-Gemini session"""
+async def create_session(call_uuid, caller_phone, plivo_ws):
     session = PlivoGeminiSession(call_uuid, caller_phone, plivo_ws)
-
     if await session.start():
         _sessions[call_uuid] = session
         return session
-
     return None
 
-
-async def get_session(call_uuid: str):
-    """Get an existing session"""
+async def get_session(call_uuid):
     return _sessions.get(call_uuid)
 
-
-async def remove_session(call_uuid: str):
-    """Remove and stop a session"""
+async def remove_session(call_uuid):
     if call_uuid in _sessions:
         await _sessions[call_uuid].stop()
         del _sessions[call_uuid]
