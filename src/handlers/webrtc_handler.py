@@ -13,10 +13,10 @@ import numpy as np
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate
 from aiortc.mediastreams import MediaStreamTrack
 
-from config import config
-from whatsapp_client import whatsapp_client
-from audio_processor import AudioProcessor
-from gemini_agent import create_agent, stop_agent, GeminiVoiceAgent
+from src.core.config import config
+from src.services.whatsapp_client import whatsapp_client
+from src.core.audio_processor import AudioProcessor
+from src.services.gemini_agent import create_agent, stop_agent, GeminiVoiceAgent
 
 
 class AudioTrackReader:

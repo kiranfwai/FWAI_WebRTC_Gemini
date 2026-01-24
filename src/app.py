@@ -7,6 +7,7 @@ Python-based implementation using aiortc for full audio access
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
+from pathlib import Path
 from loguru import logger
 import sys
 
@@ -14,8 +15,8 @@ from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
-from config import config
-from webrtc_handler import (
+from src.core.config import config
+from src.handlers.webrtc_handler import (
     make_outbound_call,
     handle_incoming_call,
     handle_ice_candidate,
@@ -31,7 +32,7 @@ logger.add(
     level="DEBUG" if config.debug else "INFO"
 )
 logger.add(
-    "whatsapp_voice.log",
+    Path(__file__).parent.parent / "logs" / "whatsapp_voice.log",
     rotation="10 MB",
     retention="7 days",
     level="DEBUG"
@@ -284,7 +285,7 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
-        "main:app",
+        "src.app:app",
         host=config.host,
         port=config.port,
         reload=config.debug,

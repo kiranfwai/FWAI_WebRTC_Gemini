@@ -16,29 +16,69 @@ venv\Scripts\activate     # Windows
 pip install -r requirements.txt
 
 # Run server
-python main.py
+python run.py
 
 # Or use startup scripts
-./start.sh    # Linux/Mac
-start.bat     # Windows
+./scripts/start.sh    # Linux/Mac
+scripts\start.bat     # Windows
+```
+
+## Project Structure
+
+```
+FWAI_WebRTC_Gemini/
+├── src/
+│   ├── __init__.py
+│   ├── app.py              # FastAPI server with endpoints
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── config.py       # Configuration management
+│   │   └── audio_processor.py  # Audio format conversion
+│   ├── services/
+│   │   ├── __init__.py
+│   │   ├── gemini_agent.py     # Gemini Live WebSocket client
+│   │   ├── gemini-live-service.py  # Standalone Gemini service
+│   │   └── whatsapp_client.py  # WhatsApp Business API client
+│   ├── handlers/
+│   │   ├── __init__.py
+│   │   └── webrtc_handler.py   # WebRTC handling with aiortc
+│   └── adapters/
+│       ├── __init__.py
+│       ├── base.py             # Abstract adapter interface
+│       ├── whatsapp_adapter.py
+│       ├── plivo_adapter.py
+│       └── exotel_adapter.py
+├── logs/                   # Application logs
+├── scripts/
+│   ├── start.sh
+│   └── start.bat
+├── docs/
+│   └── FAWI_Call_BOT.txt
+├── .env                    # Environment configuration
+├── .env.example
+├── .gitignore
+├── requirements.txt
+├── README.md
+├── CLAUDE.md
+└── run.py                  # Entry point
 ```
 
 ## Architecture
 
 ```
-WhatsApp Call ←→ aiortc WebRTC ←→ AudioProcessor ←→ Gemini Live (Pipecat)
+WhatsApp Call ←→ aiortc WebRTC ←→ AudioProcessor ←→ Gemini Live (WebSocket)
 ```
 
-### Key Files
+### Key Modules
 
-| File | Purpose |
-|------|---------|
-| `main.py` | FastAPI server with `/make-call`, `/webhook`, `/call-events` endpoints |
-| `webrtc_handler.py` | WebRTC handling with aiortc, CallSession management |
-| `gemini_agent.py` | Gemini Live voice agent using Pipecat pipeline |
-| `audio_processor.py` | Audio conversion between WebRTC (48kHz) and Gemini (16kHz) |
-| `whatsapp_client.py` | WhatsApp Business API client |
-| `config.py` | Configuration and conversation script loading |
+| Module | Purpose |
+|--------|---------|
+| `src/app.py` | FastAPI server with `/make-call`, `/webhook`, `/call-events` endpoints |
+| `src/handlers/webrtc_handler.py` | WebRTC handling with aiortc, CallSession management |
+| `src/services/gemini_agent.py` | Gemini Live voice agent WebSocket client |
+| `src/core/audio_processor.py` | Audio conversion between WebRTC (48kHz) and Gemini (16kHz) |
+| `src/services/whatsapp_client.py` | WhatsApp Business API client |
+| `src/core/config.py` | Configuration and environment variable loading |
 
 ### Audio Flow
 
@@ -48,7 +88,7 @@ WhatsApp Call ←→ aiortc WebRTC ←→ AudioProcessor ←→ Gemini Live (Pip
 ### Key Classes
 
 - `CallSession` - Manages WebRTC peer connection and audio processing for a call
-- `GeminiVoiceAgent` - Pipecat pipeline for Gemini Live with audio input/output processors
+- `GeminiVoiceAgent` - WebSocket client for Gemini Live with audio input/output
 - `AudioOutputTrack` - Custom aiortc track that outputs Gemini audio to WebRTC
 
 ## Environment Variables

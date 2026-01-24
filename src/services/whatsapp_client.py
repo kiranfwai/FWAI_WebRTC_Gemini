@@ -5,7 +5,7 @@ WhatsApp Business API Client for Voice Calls and Messages
 import httpx
 from loguru import logger
 from typing import Optional, Dict, Any
-from config import config
+from src.core.config import config
 
 
 class WhatsAppClient:
@@ -38,13 +38,14 @@ class WhatsAppClient:
             "messaging_product": "whatsapp",
             "to": phone_number,
             "type": "audio",
-            "audio": {
-                "sdp": sdp_offer
+            "session": {
+                "sdp": sdp_offer,
+                "sdp_type": "offer"
             }
         }
 
         if ice_candidates:
-            payload["audio"]["ice_candidates"] = ice_candidates
+            payload["session"]["ice_candidates"] = ice_candidates
 
         try:
             async with httpx.AsyncClient() as client:
@@ -84,33 +85,23 @@ class WhatsAppClient:
         Returns:
             API response
         """
-        # First pre-accept the call
-        pre_accept_payload = {
+        # Accept call directly with SDP answer
+        accept_payload = {
+            "messaging_product": "whatsapp",
             "call_id": call_id,
-            "action": "pre_accept"
+            "action": "accept",
+            "session": {
+                "sdp": sdp_answer,
+                "sdp_type": "answer"
+            }
         }
+
+        if ice_candidates:
+            accept_payload["session"]["ice_candidates"] = ice_candidates
 
         try:
             async with httpx.AsyncClient() as client:
-                # Pre-accept
-                response = await client.post(
-                    config.whatsapp_calls_url,
-                    headers=self.headers,
-                    json=pre_accept_payload,
-                    timeout=30.0
-                )
-                logger.info(f"Pre-accept response: {response.status_code}")
-
-                # Accept with SDP answer
-                accept_payload = {
-                    "call_id": call_id,
-                    "action": "accept",
-                    "sdp": sdp_answer
-                }
-
-                if ice_candidates:
-                    accept_payload["ice_candidates"] = ice_candidates
-
+                logger.info(f"Answering call {call_id} with SDP answer")
                 response = await client.post(
                     config.whatsapp_calls_url,
                     headers=self.headers,

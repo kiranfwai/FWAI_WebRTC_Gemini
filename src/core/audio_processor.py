@@ -9,7 +9,7 @@ from scipy import signal
 from typing import Optional, Callable, Awaitable
 from loguru import logger
 
-from config import config
+from src.core.config import config
 
 
 class AudioProcessor:

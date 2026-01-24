@@ -9,9 +9,7 @@ import base64
 from loguru import logger
 from typing import Optional, Dict, Any
 
-import sys
-sys.path.append('..')
-from config import config
+from src.core.config import config
 from .base import BaseCallAdapter
 
 

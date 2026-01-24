@@ -14,7 +14,7 @@ AI Voice Agent for WhatsApp Business Voice Calls using Google Gemini Live.
 │  └─────────────┘   │                                                        │
 │                    │     ┌──────────────┐      ┌─────────────────────┐      │
 │  ┌─────────────┐   │     │              │      │                     │      │
-│  │   Plivo     │───┼────►│   main.py    │◄────►│ gemini-live-service │      │
+│  │   Plivo     │───┼────►│   src/app.py    │◄────►│ gemini-live-service │      │
 │  └─────────────┘   │     │  (port 3000) │      │    (port 8003)      │      │
 │                    │     │              │      │                     │      │
 │  ┌─────────────┐   │     └──────┬───────┘      └──────────┬──────────┘      │
@@ -44,7 +44,7 @@ AI Voice Agent for WhatsApp Business Voice Calls using Google Gemini Live.
 
 1. **Make Call**: `POST /make-call` → Provider rings user
 2. **User Answers**: Connection established (WebRTC or PSTN)
-3. **Agent Connects**: `main.py` connects to `gemini-live-service.py` via WebSocket
+3. **Agent Connects**: `src/app.py` connects to `gemini-live-service.py` via WebSocket
 4. **Greeting**: Gemini Live speaks first with greeting prompt
 5. **Conversation**: Two-way audio flows:
    - User speaks → Audio captured → WebSocket → Gemini Live
@@ -94,12 +94,12 @@ GEMINI_LIVE_PORT=8003
 
 **Terminal 1 - Gemini Live Service (port 8003):**
 ```bash
-python gemini-live-service.py
+python src/services/gemini-live-service.py
 ```
 
 **Terminal 2 - Main Server (port 3000):**
 ```bash
-python main.py
+python src/app.py
 ```
 
 ### 4. Expose with ngrok
@@ -139,31 +139,24 @@ curl -X POST http://localhost:3000/make-call \
 
 ```
 FWAI_WebRTC_Gemini/
-├── main.py                  # FastAPI server (port 3000)
-├── gemini-live-service.py   # Gemini Live service (port 8003)
-├── webrtc_handler.py        # WebRTC with aiortc
-├── gemini_agent.py          # WebSocket client to Gemini Live
-├── audio_processor.py       # Audio resampling
-├── config.py                # Configuration (multi-provider)
-│
-├── adapters/                # NEW: Provider adapters
-│   ├── __init__.py          # Exports all adapters
-│   ├── base.py              # Abstract base class
-│   ├── whatsapp_adapter.py  # WhatsApp Business API
-│   ├── plivo_adapter.py     # Plivo Voice API
-│   └── exotel_adapter.py    # Exotel API
-│
-├── whatsapp_client.py       # Legacy WhatsApp client
-├── requirements.txt         # Python dependencies
-├── .env                     # Environment variables
-├── .env.example             # Example configuration
-└── FAWI_Call_BOT.txt        # Conversation script
+├── run.py                  # Entry point
+├── requirements.txt
+├── .env / .env.example
+├── src/
+│   ├── app.py              # FastAPI server
+│   ├── core/               # config.py, audio_processor.py
+│   ├── services/           # gemini_agent.py, whatsapp_client.py
+│   ├── handlers/           # webrtc_handler.py
+│   └── adapters/           # whatsapp, plivo, exotel adapters
+├── logs/                  # Application logs
+├── scripts/              # start.sh, start.bat
+└── docs/                 # Documentation
 ```
 
 ## Adapter Usage
 
 ```python
-from adapters import WhatsAppAdapter, PlivoAdapter, ExotelAdapter
+from src.adapters import WhatsAppAdapter, PlivoAdapter, ExotelAdapter
 
 # WhatsApp
 wa = WhatsAppAdapter()

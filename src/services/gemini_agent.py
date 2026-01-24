@@ -11,7 +11,7 @@ from loguru import logger
 import websockets
 from websockets.client import WebSocketClientProtocol
 
-from config import config
+from src.core.config import config
 
 
 class GeminiWebSocketClient:
