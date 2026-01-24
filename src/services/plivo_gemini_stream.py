@@ -31,7 +31,7 @@ class PlivoGeminiSession:
         self.start_streaming = False
         self.stream_id = ""
         self._session_task = None
-        self.BUFFER_SIZE = 1600  # Reduced for lower latency (was 3200)
+        self.BUFFER_SIZE = 800  # Reduced for lower latency (was 3200)
         self.inbuffer = bytearray(b"")
         self.greeting_sent = False
 
@@ -86,7 +86,7 @@ class PlivoGeminiSession:
                     "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": "Charon"}}}
                 },
                 "system_instruction": {"parts": [{"text": FWAI_PROMPT}]},
-                "tools": {"google_search": {}}
+                "tools": []
             }
         }
         await self.goog_live_ws.send(json.dumps(msg))
