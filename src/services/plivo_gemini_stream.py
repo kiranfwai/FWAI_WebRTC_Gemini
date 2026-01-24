@@ -31,7 +31,7 @@ class PlivoGeminiSession:
         self.start_streaming = False
         self.stream_id = ""
         self._session_task = None
-        self.BUFFER_SIZE = 800  # Reduced for lower latency (was 3200)
+        self.BUFFER_SIZE = 320  # Ultra-low latency (20ms chunks)
         self.inbuffer = bytearray(b"")
         self.greeting_sent = False
 
@@ -82,7 +82,7 @@ class PlivoGeminiSession:
             "setup": {
                 "model": "models/gemini-2.0-flash-exp",
                 "generation_config": {
-                    "response_modalities": "audio",
+                    "response_modalities": ["AUDIO"],
                     "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": "Charon"}}}
                 },
                 "system_instruction": {"parts": [{"text": FWAI_PROMPT}]},
@@ -101,15 +101,13 @@ class PlivoGeminiSession:
             "client_content": {
                 "turns": [{
                     "role": "user",
-                    "parts": [{"text": "Start"}]
+                    "parts": [{"text": "Hi"}]
                 }],
                 "turn_complete": True
             }
         }
         await self.goog_live_ws.send(json.dumps(msg))
         logger.info("Sent initial greeting trigger")
-
-
 
     async def _receive_from_google(self, message):
         try:

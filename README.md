@@ -182,3 +182,71 @@ The Node.js `@roamhq/wrtc` library couldn't extract audio from WebRTC tracks. Py
 - Consistent interface across all providers
 - Provider-specific features (TTS, recording, etc.)
 - Fallback options for different regions
+
+## Plivo + Google Live API (Recommended)
+
+The simplest and most cost-effective setup using Plivo for telephony and Google Live API for real-time AI voice.
+
+### Cost Breakdown
+| Component | Provider | Cost |
+|-----------|----------|------|
+| Phone Line | Plivo (Outbound) | ~/bin/bash.012/min |
+| Real-time Audio | Plivo Stream | ~/bin/bash.003/min |
+| AI Brain + Voice | Gemini 2.0 Flash | Free tier available |
+| Orchestration | Your server | Minimal |
+
+### Quick Test
+
+1. **Start ngrok:**
+
+
+2. **Update :**
+SHELL=/bin/bash
+WSL2_GUI_APPS_ENABLED=1
+WSL_DISTRO_NAME=Ubuntu-22.04
+NAME=DESKTOP-TRROJ24
+PWD=/mnt/c
+LOGNAME=kiran
+HOME=/home/kiran
+LANG=C.UTF-8
+WSL_INTEROP=/run/WSL/27060_interop
+WAYLAND_DISPLAY=wayland-0
+TERM=xterm-256color
+USER=kiran
+DISPLAY=:0
+SHLVL=1
+XDG_RUNTIME_DIR=/run/user/1000/
+WSLENV=
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/usr/lib/wsl/lib:/mnt/c/Users/Admin/bin:/mnt/d/Softwares/Git/mingw64/bin:/mnt/d/Softwares/Git/usr/local/bin:/mnt/d/Softwares/Git/usr/bin:/mnt/d/Softwares/Git/usr/bin:/mnt/d/Softwares/Git/mingw64/bin:/mnt/d/Softwares/Git/usr/bin:/mnt/c/Users/Admin/bin:/mnt/c/Python314/Scripts:/mnt/c/Python314:/mnt/c/Windows/system32:/mnt/c/Windows:/mnt/c/Windows/System32/Wbem:/mnt/c/Windows/System32/WindowsPowerShell/v1.0:/mnt/c/Windows/System32/OpenSSH:/mnt/d/Softwares/Git/cmd:/mnt/d/Softwares:/mnt/c/ProgramData/chocolatey/bin:/Docker/host/bin:/mnt/c/Python314/Scripts:/mnt/c/Python314:/mnt/c/Windows/system32:/mnt/c/Windows:/mnt/c/Windows/System32/Wbem:/mnt/c/Windows/System32/WindowsPowerShell/v1.0:/mnt/c/Windows/System32/OpenSSH:/mnt/d/Softwares/Git/cmd:/mnt/d/Softwares:/mnt/c/ProgramData/chocolatey/bin:/mnt/c/Users/Admin/AppData/Local/Microsoft/WindowsApps:/mnt/c/Users/Admin/AppData/Local/Programs/cursor/resources/app/bin:/mnt/c/Users/Admin/AppData/Roaming/npm:/mnt/c/Users/Admin/AppData/Roaming/npm:/mnt/c/Users/Admin/AppData/Local/Programs/Microsoft VS Code/bin:/mnt/c/Users/Admin/AppData/Local/Programs/Antigravity/bin:/mnt/d/Softwares/Git/usr/bin/vendor_perl:/mnt/d/Softwares/Git/usr/bin/core_perl
+DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+HOSTTYPE=x86_64
+PULSE_SERVER=unix:/mnt/wslg/PulseServer
+_=/usr/bin/env
+
+3. **Start server:**
+2026-01-24 21:26:57 | INFO     | src.app:lifespan:68 - ============================================================
+2026-01-24 21:26:57 | INFO     | src.app:lifespan:69 - WhatsApp Voice Calling with Gemini Live
+2026-01-24 21:26:57 | INFO     | src.app:lifespan:70 - ============================================================
+2026-01-24 21:26:57 | INFO     | src.app:lifespan:78 - Server starting on http://0.0.0.0:3000
+2026-01-24 21:26:57 | INFO     | src.app:lifespan:79 - Gemini Voice: Kore
+2026-01-24 21:26:57 | INFO     | src.app:lifespan:84 - Server shutting down...
+
+4. **Make a call:**
+{"detail":[{"type":"json_invalid","loc":["body",1],"msg":"JSON decode error","input":{},"ctx":{"error":"Expecting property name enclosed in double quotes"}}]}
+
+### Transcripts
+
+Call transcripts with timestamps are saved to:
+
+
+Format:
+
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+|  | FastAPI server with Plivo endpoints |
+|  | Plivo ↔ Google Live API bridge |
+|  | FWAI sales agent prompt |
+|  | Call transcripts with timestamps |

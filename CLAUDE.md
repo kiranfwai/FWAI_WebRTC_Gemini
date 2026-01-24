@@ -311,3 +311,50 @@ DEBUG=true
 ```
 
 5. **Both inbound and outbound use same Gemini flow** - After `/plivo/answer`, the flow is identical for both call directions.
+
+## Session Continuation Notes
+
+When continuing work on this project in a new Claude Code session:
+
+### 1. Start the Server
+
+
+### 2. Verify ngrok is Running
+
+
+### 3. Update PLIVO_CALLBACK_URL
+If ngrok URL changed, update :
+
+
+### 4. Test a Call
+{"detail":[{"type":"json_invalid","loc":["body",1],"msg":"JSON decode error","input":{},"ctx":{"error":"Expecting property name enclosed in double quotes"}}]}
+
+### 5. Check Logs
+
+
+### Current Working Configuration
+
+- **Model:**  (supports bidiGenerateContent)
+- **Audio Format:** L16 16kHz (input) / L16 24kHz (output)
+- **Voice:** Kore (Indian English)
+- **Prompt:** FWAI Sales Agent (Vishnu) from 
+
+### Known Issues & Solutions
+
+1. **"Model not found for bidiGenerateContent"**
+   - Use  model
+   - NOT  or 
+
+2. **No audio after "Connected to AI"**
+   - Check Google Live API connection in logs
+   - Verify  message received
+   - Ensure 
+
+3. **Call not connecting**
+   - Check ngrok is running
+   - Verify PLIVO_CALLBACK_URL matches ngrok URL
+   - Check Plivo account has credits
+
+4. **High latency**
+   - Reduce BUFFER_SIZE in plivo_gemini_stream.py
+   - Current optimized value: 4800

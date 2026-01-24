@@ -1,40 +1,42 @@
 """
-Gemini with Function Calling Service
-Handles AI responses with tool execution capability
+Gemini Service - Optimized for low latency and natural conversation
 """
 
 import google.generativeai as genai
 from typing import Dict, Any, Optional, Tuple
 from loguru import logger
+import time
 
 from src.core.config import config
 from src.tools import get_tool_definitions, execute_tool
-from src.prompt_loader import FWAI_PROMPT
 
 
-# Configure Gemini
+# Configure Gemini ONCE at module load
 genai.configure(api_key=config.google_api_key)
 
+# Pre-load model at startup
+_model = None
 
-def get_gemini_model_with_tools():
-    """Get Gemini model configured with tools"""
-    tools = get_tool_definitions()
-    
-    # Convert to Gemini function declarations format
-    function_declarations = []
-    for tool in tools:
-        function_declarations.append({
-            "name": tool["name"],
-            "description": tool["description"],
-            "parameters": tool["parameters"]
-        })
-    
-    model = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
-        tools=[{"function_declarations": function_declarations}]
-    )
-    
-    return model
+def _get_model():
+    global _model
+    if _model is None:
+        start = time.time()
+        tools = get_tool_definitions()
+        function_declarations = [{
+            "name": t["name"],
+            "description": t["description"],
+            "parameters": t["parameters"]
+        } for t in tools]
+        
+        _model = genai.GenerativeModel(
+            model_name="gemini-2.0-flash",
+            tools=[{"function_declarations": function_declarations}]
+        )
+        logger.info(f"Model initialized in {time.time()-start:.2f}s")
+    return _model
+
+# Initialize at import
+_get_model()
 
 
 async def generate_response_with_tools(
@@ -42,38 +44,40 @@ async def generate_response_with_tools(
     user_message: str,
     caller_phone: str
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
-    """
-    Generate response using Gemini with function calling
+    """Generate conversational response"""
     
-    Returns:
-        Tuple of (response_text, tool_result)
-    """
+    start = time.time()
+    
     try:
-        model = get_gemini_model_with_tools()
+        model = _get_model()
         
-        # Build context
-        context = f"""You are Vishnu, currently on a phone call with a potential customer.
-The caller's phone number is: {caller_phone}
+        # Simple, focused prompt that emphasizes listening
+        prompt = f"""You are Vishnu, a friendly AI counselor on a phone call.
 
-CONVERSATION SO FAR:
+CRITICAL: Actually respond to what the user says! Do not ignore their words.
+
+Conversation so far:
 {history}
 
-User just said: {user_message}
+User just said: "{user_message}"
 
-IMPORTANT INSTRUCTIONS:
-- If user asks to send WhatsApp/SMS/email, use the appropriate tool
-- If user wants to book a demo or schedule a callback, use those tools
-- Otherwise, respond naturally following the NEPQ sales process
-- Always ask ONE question at a time
-- Do NOT repeat the greeting or introduce yourself again
-"""
+Instructions:
+- DIRECTLY address what they just said
+- If they said something negative, acknowledge it empathetically
+- If they asked a question, answer it
+- If they want info sent (WhatsApp/SMS/email), use the tool
+- Keep response under 2 sentences
+- Ask ONE follow-up question if appropriate
+
+Respond naturally:"""
         
-        full_prompt = FWAI_PROMPT + chr(10) + chr(10) + context
+        # Generate
+        gemini_start = time.time()
+        response = model.generate_content(prompt)
+        gemini_time = time.time() - gemini_start
+        logger.info(f"GEMINI: {gemini_time:.2f}s")
         
-        # Generate response
-        response = model.generate_content(full_prompt)
-        
-        # Check if there's a function call
+        # Check for tool call
         if response.candidates and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
                 if hasattr(part, 'function_call') and part.function_call:
@@ -81,40 +85,26 @@ IMPORTANT INSTRUCTIONS:
                     tool_name = fc.name
                     tool_args = dict(fc.args) if fc.args else {}
                     
-                    logger.info(f"Tool call detected: {tool_name} with args {tool_args}")
+                    logger.info(f"TOOL: {tool_name}")
+                    result = await execute_tool(tool_name, caller_phone, **tool_args)
                     
-                    # Execute the tool
-                    tool_result = await execute_tool(
-                        tool_name=tool_name,
-                        caller_phone=caller_phone,
-                        **tool_args
-                    )
-                    
-                    # Generate follow-up response after tool execution
-                    if tool_result["success"]:
-                        follow_up = await generate_tool_follow_up(tool_name, tool_result)
-                        return follow_up, tool_result
-                    else:
-                        return f"I apologize, I wasn't able to {tool_name.replace('_', ' ')} right now. Let me make a note and we'll follow up. {tool_result['message']}", tool_result
+                    if result["success"]:
+                        followup = {
+                            "send_whatsapp": "Done! I sent you a WhatsApp. What else?",
+                            "send_sms": "SMS sent! Anything else?",
+                            "send_email": "Email sent! What else can I help with?",
+                            "schedule_callback": "Callback scheduled! Anything specific to discuss?",
+                            "book_demo": "Demo booked! Looking forward to it."
+                        }.get(tool_name, "Done!")
+                        logger.info(f"TOTAL: {time.time()-start:.2f}s")
+                        return followup, result
+                    return "Sorry, I could not do that. What else can I help with?", result
         
-        # Regular text response
         reply = response.text.replace('"', "''").strip()
+        logger.info(f"REPLY: {reply[:50]}...")
+        logger.info(f"TOTAL: {time.time()-start:.2f}s")
         return reply, None
         
     except Exception as e:
-        logger.error(f"Gemini with tools error: {e}")
-        return "I apologize, I'm having a small technical issue. Could you please repeat that?", None
-
-
-async def generate_tool_follow_up(tool_name: str, result: Dict[str, Any]) -> str:
-    """Generate a natural follow-up response after tool execution"""
-    
-    follow_ups = {
-        "send_whatsapp": "I've sent you a WhatsApp message with the details. You should receive it shortly. Is there anything specific you'd like me to include?",
-        "send_sms": "I've sent you an SMS with the information. You should receive it in a moment. What else would you like to know?",
-        "send_email": "I've sent you an email with all the details. Please check your inbox. Is there anything else I can help you with?",
-        "schedule_callback": f"Perfect! I've scheduled a callback for {result.get('data', {}).get('preferred_time', 'your preferred time')}. We'll call you then. Is there anything specific you'd like us to cover?",
-        "book_demo": f"Excellent! Your demo is booked for {result.get('data', {}).get('preferred_date', 'your preferred date')} at {result.get('data', {}).get('preferred_time', 'your preferred time')}. You'll receive a confirmation shortly. Is there anything specific you'd like to see in the demo?"
-    }
-    
-    return follow_ups.get(tool_name, "Done! Is there anything else I can help you with?")
+        logger.error(f"Error: {e}")
+        return "Sorry, could you say that again?", None

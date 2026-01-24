@@ -78,6 +78,21 @@ class Config(BaseModel):
     def whatsapp_messages_url(self) -> str:
         return f"{self.whatsapp_api_url}/messages"
 
+    # Logging settings
+    log_level: str = os.getenv("LOG_LEVEL", "INFO")
+    enable_transcripts: bool = os.getenv("ENABLE_TRANSCRIPTS", "true").lower() == "true"
+    enable_detailed_logging: bool = os.getenv("ENABLE_DETAILED_LOGGING", "true").lower() == "true"
+    
+    # SMTP Email settings
+    smtp_host: str = os.getenv("SMTP_HOST", "")
+    smtp_port: int = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user: str = os.getenv("SMTP_USER", "")
+    smtp_password: str = os.getenv("SMTP_PASSWORD", "")
+    smtp_from_email: str = os.getenv("SMTP_FROM_EMAIL", "noreply@freedomwithai.com")
+    
+    # WhatsApp Phone ID (for Meta API)
+    whatsapp_phone_id: str = os.getenv("WHATSAPP_PHONE_ID", "")
+
     def validate_config(self) -> list[str]:
         """Validate required configuration values based on active provider"""
         errors = []
@@ -151,12 +166,5 @@ INSTRUCTIONS:
         print(f"Error loading conversation script: {e}")
         return "You are Mousumi, a Senior Counselor at Freedom with AI."
 
-    # SMTP Email settings
-    smtp_host: str = os.getenv("SMTP_HOST", "")
-    smtp_port: int = int(os.getenv("SMTP_PORT", "587"))
-    smtp_user: str = os.getenv("SMTP_USER", "")
-    smtp_password: str = os.getenv("SMTP_PASSWORD", "")
-    smtp_from_email: str = os.getenv("SMTP_FROM_EMAIL", "noreply@freedomwithai.com")
     
-    # WhatsApp Phone ID (for Meta API)
-    whatsapp_phone_id: str = os.getenv("WHATSAPP_PHONE_ID", "")
+

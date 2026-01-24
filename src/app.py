@@ -380,8 +380,8 @@ async def plivo_answer(request: Request):
     status_url = f"{config.plivo_callback_url}/plivo/stream-status"
     xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Speak voice="Polly.Aditi">Connected to AI Assistant. Please wait.</Speak>
-    <Stream streamTimeout="86400" keepCallAlive="true" bidirectional="true" contentType="audio/x-mulaw;rate=8000" statusCallbackUrl="{status_url}">{stream_url}</Stream>
+    
+    <Stream streamTimeout="86400" keepCallAlive="true" bidirectional="true" contentType="audio/x-l16;rate=16000" statusCallbackUrl="{status_url}">{stream_url}</Stream>
 </Response>"""
 
     return Response(content=xml_response, media_type="application/xml")
