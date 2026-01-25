@@ -17,8 +17,8 @@ from src.tools import execute_tool
 RECORDINGS_DIR = Path(__file__).parent.parent.parent / "recordings"
 RECORDINGS_DIR.mkdir(exist_ok=True)
 
-# Load FWAI prompt
-def load_fwai_prompt():
+# Load default FWAI prompt (used when no prompt passed from API)
+def load_default_prompt():
     try:
         prompts_file = Path(__file__).parent.parent.parent / "prompts.json"
         with open(prompts_file) as f:
@@ -27,22 +27,47 @@ def load_fwai_prompt():
     except:
         return "You are a helpful AI assistant."
 
-FWAI_PROMPT = load_fwai_prompt()
+DEFAULT_PROMPT = load_default_prompt()
 
 # Tool definitions for Gemini Live
 TOOL_DECLARATIONS = [
     {
         "name": "send_whatsapp",
-        "description": "Send a WhatsApp message to the caller with course details, links, or follow-up information. Use this when the user asks to receive information on WhatsApp.",
+        "description": """Send a beautifully formatted WhatsApp message to the caller.
+ALWAYS use a template when possible - they look professional and contain all needed info.
+
+Choose template based on what user is asking:
+
+📚 template_id='course_details' - USE WHEN:
+   • User asks "what's included?", "tell me more", "what will I learn?"
+   • User wants to know about features, curriculum, benefits
+   • User asks about pricing or what they get
+
+💳 template_id='payment_link' - USE WHEN:
+   • User says "I want to join", "how do I pay?", "I'm ready"
+   • User asks for payment link or enrollment link
+   • User confirms they want to purchase
+
+🆘 template_id='support_contact' - USE WHEN:
+   • User has a problem, complaint, or issue
+   • User says "I need help", "something's not working"
+   • User is frustrated or needs customer support
+
+Only use custom_message for very specific requests that don't fit any template.""",
         "parameters": {
             "type": "object",
             "properties": {
-                "message": {
+                "template_id": {
                     "type": "string",
-                    "description": "The message content to send via WhatsApp"
+                    "description": "Template ID: 'course_details' (info/features), 'payment_link' (ready to buy), or 'support_contact' (help/issues)",
+                    "enum": ["course_details", "payment_link", "support_contact"]
+                },
+                "custom_message": {
+                    "type": "string",
+                    "description": "Custom message - ONLY use if no template fits the situation"
                 }
             },
-            "required": ["message"]
+            "required": []
         }
     },
     {
@@ -80,9 +105,11 @@ TOOL_DECLARATIONS = [
 ]
 
 class PlivoGeminiSession:
-    def __init__(self, call_uuid: str, caller_phone: str):
+    def __init__(self, call_uuid: str, caller_phone: str, prompt: str = None, context: dict = None):
         self.call_uuid = call_uuid
         self.caller_phone = caller_phone
+        self.prompt = prompt or DEFAULT_PROMPT  # Use passed prompt or default
+        self.context = context or {}  # Context for templates (customer_name, course_name, etc.)
         self.plivo_ws = None  # Will be set when WebSocket connects
         self.goog_live_ws = None
         self.is_active = False
@@ -124,6 +151,8 @@ class PlivoGeminiSession:
             return
         # Store with metadata (role and sample_rate for resampling later)
         self.audio_chunks.append((role, audio_bytes, sample_rate))
+        if len(self.audio_chunks) % 50 == 1:  # Log every 50 chunks
+            logger.debug(f"Recording: {len(self.audio_chunks)} chunks ({role})")
 
     def _resample_24k_to_16k(self, audio_bytes: bytes) -> bytes:
         """Resample 24kHz audio to 16kHz (simple linear interpolation)"""
@@ -144,7 +173,9 @@ class PlivoGeminiSession:
 
     def _save_recording(self):
         """Save combined recording as WAV file"""
+        logger.info(f"Saving recording: enabled={self.recording_enabled}, chunks={len(self.audio_chunks)}")
         if not self.recording_enabled or not self.audio_chunks:
+            logger.warning(f"Skipping recording: enabled={self.recording_enabled}, chunks={len(self.audio_chunks)}")
             return None
         try:
             recording_file = RECORDINGS_DIR / f"{self.call_uuid}.wav"
@@ -270,7 +301,7 @@ SPEAKING STYLE (VERY IMPORTANT):
 - Occasionally use filler words naturally
 - React naturally to what user says ("Oh nice!", "I see", "That's great")
 """
-        full_prompt = FWAI_PROMPT + natural_speech
+        full_prompt = self.prompt + natural_speech
 
         msg = {
             "setup": {
@@ -321,8 +352,8 @@ SPEAKING STYLE (VERY IMPORTANT):
                 logger.info(f"TOOL CALL: {tool_name} with args: {tool_args}")
                 self._save_transcript("TOOL", f"{tool_name}: {tool_args}")
 
-                # Execute the tool
-                result = await execute_tool(tool_name, self.caller_phone, **tool_args)
+                # Execute the tool with context for templates
+                result = await execute_tool(tool_name, self.caller_phone, context=self.context, **tool_args)
 
                 logger.info(f"TOOL RESULT: {result}")
                 self._save_transcript("TOOL_RESULT", f"{tool_name}: {'success' if result.get('success') else 'failed'}")
@@ -448,14 +479,14 @@ SPEAKING STYLE (VERY IMPORTANT):
 _sessions: Dict[str, PlivoGeminiSession] = {}
 _preloading_sessions: Dict[str, PlivoGeminiSession] = {}
 
-async def preload_session(call_uuid: str, caller_phone: str) -> bool:
+async def preload_session(call_uuid: str, caller_phone: str, prompt: str = None, context: dict = None) -> bool:
     """Preload a session while phone is ringing"""
-    session = PlivoGeminiSession(call_uuid, caller_phone)
+    session = PlivoGeminiSession(call_uuid, caller_phone, prompt=prompt, context=context)
     _preloading_sessions[call_uuid] = session
     success = await session.preload()
     return success
 
-async def create_session(call_uuid: str, caller_phone: str, plivo_ws) -> Optional[PlivoGeminiSession]:
+async def create_session(call_uuid: str, caller_phone: str, plivo_ws, prompt: str = None, context: dict = None) -> Optional[PlivoGeminiSession]:
     """Create or retrieve preloaded session"""
     # Check for preloaded session
     if call_uuid in _preloading_sessions:
@@ -469,7 +500,7 @@ async def create_session(call_uuid: str, caller_phone: str, plivo_ws) -> Optiona
 
     # Fallback: create new session
     logger.info(f"No preloaded session, creating new for {call_uuid}")
-    session = PlivoGeminiSession(call_uuid, caller_phone)
+    session = PlivoGeminiSession(call_uuid, caller_phone, prompt=prompt, context=context)
     session.plivo_ws = plivo_ws
     session._save_transcript("SYSTEM", "Call started")
     if await session.preload():
