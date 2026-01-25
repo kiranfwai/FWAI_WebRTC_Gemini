@@ -8,19 +8,22 @@ Import `outbound_call.json` into n8n to enable:
 
 **Webhook URL:** `POST https://your-n8n-url/webhook/trigger-call`
 
-**Request Body:**
+**Request Body (Simple - just phone number):**
+```json
+{
+  "phoneNumber": "919052034075"
+}
+```
+
+**Request Body (With contact name):**
 ```json
 {
   "phoneNumber": "919052034075",
-  "contactName": "Kiran",
-  "prompt": "You are Vishnu from Freedom with AI...",
-  "context": {
-    "customer_name": "Kiran",
-    "course_name": "Gold Membership",
-    "price": "40,000"
-  }
+  "contactName": "Kiran"
 }
 ```
+
+> **Note:** The complete FWAI Vishnu prompt (NEPQ sales methodology) is already embedded in the n8n workflow. You only need to pass the phone number.
 
 ### 2. Receive Call Ended Notification
 

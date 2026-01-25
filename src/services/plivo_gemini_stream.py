@@ -5,6 +5,7 @@ import base64
 import wave
 import struct
 import threading
+import queue
 from typing import Dict, Optional
 from loguru import logger
 from datetime import datetime
@@ -126,7 +127,8 @@ IMPORTANT: Always say a warm goodbye BEFORE calling this tool, then call it to a
 
 class PlivoGeminiSession:
     def __init__(self, call_uuid: str, caller_phone: str, prompt: str = None, context: dict = None, webhook_url: str = None):
-        self.call_uuid = call_uuid
+        self.call_uuid = call_uuid  # Internal UUID
+        self.plivo_call_uuid = None  # Plivo's actual call UUID (set later)
         self.caller_phone = caller_phone
         self.prompt = prompt or DEFAULT_PROMPT  # Use passed prompt or default
         self.context = context or {}  # Context for templates (customer_name, course_name, etc.)
@@ -145,9 +147,13 @@ class PlivoGeminiSession:
         self.preloaded_audio = []  # Store audio generated during preload
         self._preload_complete = asyncio.Event()
 
-        # Audio recording - single combined file (for post-call transcription)
+        # Audio recording - using queue and background thread (non-blocking)
         self.audio_chunks = []  # List of (role, audio_bytes) tuples
         self.recording_enabled = config.enable_transcripts
+        self._recording_queue = queue.Queue() if self.recording_enabled else None
+        self._recording_thread = None
+        if self.recording_enabled:
+            self._start_recording_thread()
 
         # Flag to prevent double greeting
         self.greeting_audio_complete = False
@@ -172,14 +178,33 @@ class PlivoGeminiSession:
         except Exception as e:
             logger.error(f"Error saving transcript: {e}")
 
+    def _start_recording_thread(self):
+        """Start background thread for recording audio"""
+        def recording_worker():
+            while True:
+                try:
+                    item = self._recording_queue.get(timeout=1.0)
+                    if item is None:  # Shutdown signal
+                        break
+                    self.audio_chunks.append(item)
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    logger.error(f"Recording thread error: {e}")
+
+        self._recording_thread = threading.Thread(target=recording_worker, daemon=True)
+        self._recording_thread.start()
+        logger.debug("Recording thread started")
+
     def _record_audio(self, role: str, audio_bytes: bytes, sample_rate: int = 16000):
-        """Record audio chunk for post-call transcription"""
-        if not self.recording_enabled:
+        """Record audio chunk for post-call transcription (non-blocking)"""
+        if not self.recording_enabled or not self._recording_queue:
             return
-        # Store with metadata (role and sample_rate for resampling later)
-        self.audio_chunks.append((role, audio_bytes, sample_rate))
-        if len(self.audio_chunks) % 50 == 1:  # Log every 50 chunks
-            logger.debug(f"Recording: {len(self.audio_chunks)} chunks ({role})")
+        # Put in queue - non-blocking, doesn't affect call latency
+        try:
+            self._recording_queue.put_nowait((role, audio_bytes, sample_rate))
+        except queue.Full:
+            pass  # Drop frame if queue is full (shouldn't happen)
 
     def _resample_24k_to_16k(self, audio_bytes: bytes) -> bytes:
         """Resample 24kHz audio to 16kHz (simple linear interpolation)"""
@@ -228,37 +253,51 @@ class PlivoGeminiSession:
             return None
 
     def _transcribe_recording(self, recording_file: Path):
-        """Transcribe recording using Whisper (runs in background thread)"""
-        def transcribe():
+        """Transcribe recording using Whisper (synchronous - completes before returning)"""
+        try:
+            import whisper
+            logger.info(f"Starting transcription for {self.call_uuid}")
+            model = whisper.load_model("base")  # Options: tiny, base, small, medium, large
+            result = model.transcribe(str(recording_file))
+            transcript_text = result["text"].strip()
+
+            # Format transcript with speaker labels based on conversation pattern
+            # Agent speaks first, then alternates with user
+            formatted_lines = []
+            sentences = [s.strip() for s in transcript_text.replace('?', '?|').replace('.', '.|').replace('!', '!|').split('|') if s.strip()]
+
+            is_agent = True  # Agent starts first
+            for sentence in sentences:
+                if not sentence:
+                    continue
+                speaker = "AGENT" if is_agent else "USER"
+                formatted_lines.append(f"{speaker}: {sentence}")
+                # Simple heuristic: questions from agent, short responses from user
+                if '?' in sentence or len(sentence) > 80:
+                    is_agent = False  # Next is likely user response
+                else:
+                    is_agent = True  # Next is likely agent
+
+            # Save formatted transcript
+            transcript_file = Path(__file__).parent.parent.parent / "transcripts" / f"{self.call_uuid}.txt"
+            with open(transcript_file, "a") as f:
+                f.write(f"\n--- CONVERSATION TRANSCRIPT ---\n")
+                for line in formatted_lines:
+                    f.write(f"{line}\n")
+
+            logger.info(f"Transcription complete for {self.call_uuid}")
+
+            # Delete recording file after successful transcription
             try:
-                import whisper
-                logger.info(f"Starting transcription for {self.call_uuid}")
-                model = whisper.load_model("base")  # Options: tiny, base, small, medium, large
-                result = model.transcribe(str(recording_file))
-                transcript_text = result["text"]
-
-                # Save to transcript file
-                transcript_file = Path(__file__).parent.parent.parent / "transcripts" / f"{self.call_uuid}.txt"
-                with open(transcript_file, "a") as f:
-                    f.write(f"\n--- FULL TRANSCRIPT ---\n{transcript_text}\n")
-
-                logger.info(f"Transcription complete for {self.call_uuid}")
-
-                # Delete recording file after successful transcription
-                try:
-                    recording_file.unlink()
-                    logger.info(f"Recording deleted: {recording_file}")
-                except Exception as e:
-                    logger.warning(f"Could not delete recording: {e}")
-
-            except ImportError:
-                logger.warning("Whisper not installed. Run: pip install openai-whisper")
+                recording_file.unlink()
+                logger.info(f"Recording deleted: {recording_file}")
             except Exception as e:
-                logger.error(f"Transcription error: {e}")
+                logger.warning(f"Could not delete recording: {e}")
 
-        # Run in background thread to not block
-        thread = threading.Thread(target=transcribe, daemon=True)
-        thread.start()
+        except ImportError:
+            logger.warning("Whisper not installed. Run: pip install openai-whisper")
+        except Exception as e:
+            logger.error(f"Transcription error: {e}")
 
     async def preload(self):
         """Preload the Gemini session while phone is ringing"""
@@ -266,9 +305,9 @@ class PlivoGeminiSession:
             logger.info(f"PRELOADING Gemini session for call {self.call_uuid}")
             self.is_active = True
             self._session_task = asyncio.create_task(self._run_google_live_session())
-            # Wait for setup to complete (with timeout - increased to 15s)
+            # Wait for setup to complete (with timeout - 5s max)
             try:
-                await asyncio.wait_for(self._preload_complete.wait(), timeout=15.0)
+                await asyncio.wait_for(self._preload_complete.wait(), timeout=5.0)
                 logger.info(f"PRELOAD COMPLETE for {self.call_uuid} - AI ready to speak! ({len(self.preloaded_audio)} audio chunks)")
             except asyncio.TimeoutError:
                 logger.warning(f"Preload timeout for {self.call_uuid} - continuing anyway with {len(self.preloaded_audio)} chunks")
@@ -390,7 +429,7 @@ IMPORTANT: Maintain this Indian English accent consistently for EVERY response. 
 
         msg = {
             "setup": {
-                "model": "models/gemini-2.5-flash-native-audio-preview-12-2025",
+                "model": "models/gemini-2.5-flash-native-audio-preview-09-2025",
                 "generation_config": {
                     "response_modalities": ["AUDIO"],
                     "speech_config": {
@@ -506,7 +545,9 @@ IMPORTANT: Maintain this Indian English accent consistently for EVERY response. 
             auth_string = f"{config.plivo_auth_id}:{config.plivo_auth_token}"
             auth_b64 = base64.b64encode(auth_string.encode()).decode()
 
-            url = f"https://api.plivo.com/v1/Account/{config.plivo_auth_id}/Call/{self.call_uuid}/"
+            # Use Plivo's UUID if available, otherwise fall back to internal UUID
+            hangup_uuid = self.plivo_call_uuid or self.call_uuid
+            url = f"https://api.plivo.com/v1/Account/{config.plivo_auth_id}/Call/{hangup_uuid}/"
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -554,6 +595,11 @@ IMPORTANT: Maintain this Indian English accent consistently for EVERY response. 
             if "serverContent" in resp:
                 sc = resp["serverContent"]
 
+                # Debug: log all serverContent keys to find user transcription field
+                sc_keys = list(sc.keys())
+                if sc_keys != ['modelTurn'] and sc_keys != ['turnComplete']:
+                    logger.info(f"serverContent keys: {sc_keys}")
+
                 # Check if turn is complete (greeting done)
                 if sc.get("turnComplete"):
                     logger.info(f"Turn complete - greeting_audio_complete was {self.greeting_audio_complete}")
@@ -564,6 +610,13 @@ IMPORTANT: Maintain this Indian English accent consistently for EVERY response. 
                     logger.info("AI was interrupted by user")
                     if self.plivo_ws:
                         await self.plivo_ws.send_text(json.dumps({"event": "clearAudio", "stream_id": self.stream_id}))
+
+                # Capture user speech transcription from Gemini
+                if "inputTranscript" in sc:
+                    user_text = sc["inputTranscript"]
+                    if user_text and user_text.strip():
+                        logger.info(f"USER said: {user_text}")
+                        self._save_transcript("USER", user_text.strip())
 
                 if "modelTurn" in sc:
                     parts = sc.get("modelTurn", {}).get("parts", [])
@@ -590,8 +643,21 @@ IMPORTANT: Maintain this Indian English accent consistently for EVERY response. 
                                 except Exception as plivo_err:
                                     logger.error(f"Error sending audio to Plivo: {plivo_err} - continuing")
                         if p.get("text"):
-                            logger.info(f"AI TEXT: {p['text'][:100]}...")
-                            self._save_transcript("VISHNU", p["text"])
+                            ai_text = p["text"].strip()
+                            logger.info(f"AI TEXT: {ai_text[:100]}...")
+                            # Only save actual speech, not thinking/planning text
+                            # Skip text that looks like internal reasoning (markdown, planning phrases)
+                            is_thinking = (
+                                ai_text.startswith("**") or
+                                ai_text.startswith("I've registered") or
+                                ai_text.startswith("I'll ") or
+                                "My first step" in ai_text or
+                                "I'll be keeping" in ai_text or
+                                "maintaining the" in ai_text or
+                                "waiting for their response" in ai_text
+                            )
+                            if ai_text and not is_thinking and len(ai_text) > 3:
+                                self._save_transcript("AGENT", ai_text)
         except Exception as e:
             logger.error(f"Error processing Google message: {e} - continuing session")
 
@@ -618,8 +684,6 @@ IMPORTANT: Maintain this Indian English accent consistently for EVERY response. 
                 except Exception as send_err:
                     logger.error(f"Error sending audio to Google: {send_err} - continuing")
                 self.inbuffer = self.inbuffer[self.BUFFER_SIZE:]
-            if chunks_sent > 0 and len(self.audio_chunks) % 100 == 0:
-                logger.info(f"Sent {chunks_sent} audio chunks to Gemini (total user chunks: {len(self.audio_chunks)})")
         except Exception as e:
             logger.error(f"Audio processing error: {e} - continuing session")
 
@@ -636,6 +700,11 @@ IMPORTANT: Maintain this Indian English accent consistently for EVERY response. 
             await self.stop()
 
     async def stop(self):
+        # Guard against double-stop
+        if not self.is_active:
+            logger.debug(f"Session {self.call_uuid} already stopped, skipping")
+            return
+
         logger.info(f"Stopping session for {self.call_uuid}")
         self.is_active = False
 
@@ -658,6 +727,12 @@ IMPORTANT: Maintain this Indian English accent consistently for EVERY response. 
         if self._session_task:
             self._session_task.cancel()
         self._save_transcript("SYSTEM", "Call ended")
+
+        # Stop recording thread and save recording
+        if self._recording_queue:
+            self._recording_queue.put(None)  # Shutdown signal
+        if self._recording_thread:
+            self._recording_thread.join(timeout=2.0)
 
         # Save recording and transcribe in background
         recording_file = self._save_recording()
@@ -702,6 +777,13 @@ IMPORTANT: Maintain this Indian English accent consistently for EVERY response. 
 # Session storage
 _sessions: Dict[str, PlivoGeminiSession] = {}
 _preloading_sessions: Dict[str, PlivoGeminiSession] = {}
+
+def set_plivo_uuid(internal_uuid: str, plivo_uuid: str):
+    """Set the Plivo UUID on a preloaded session for proper hangup"""
+    session = _preloading_sessions.get(internal_uuid) or _sessions.get(internal_uuid)
+    if session:
+        session.plivo_call_uuid = plivo_uuid
+        logger.info(f"Set Plivo UUID {plivo_uuid} on session {internal_uuid}")
 
 async def preload_session(call_uuid: str, caller_phone: str, prompt: str = None, context: dict = None, webhook_url: str = None) -> bool:
     """Preload a session while phone is ringing"""

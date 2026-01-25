@@ -326,6 +326,11 @@ from src.adapters.plivo_adapter import plivo_adapter
 # Store call data for pending calls (call_uuid -> {phone, prompt, context})
 _pending_call_data = {}
 
+# Mapping from Plivo's request_uuid to our internal call_uuid (for preloaded sessions)
+_plivo_to_internal_uuid = {}
+# Reverse mapping: internal UUID to Plivo UUID
+_internal_to_plivo_uuid = {}
+
 
 class PlivoMakeCallRequest(BaseModel):
     phoneNumber: str
@@ -341,51 +346,66 @@ async def plivo_make_call(request: PlivoMakeCallRequest):
     Make an outbound call using Plivo with Gemini Live AI
 
     Flow:
-    1. Plivo API initiates call to the phone number
-    2. When user answers, Plivo hits /plivo/answer
-    3. /plivo/answer returns <Stream> XML
-    4. Plivo connects WebSocket to /plivo/stream/{call_uuid}
-    5. Gemini Live session starts, AI greets the user
-    6. Bidirectional audio conversation begins
+    1. Preload Gemini session FIRST (AI ready before phone rings)
+    2. Plivo API initiates call to the phone number
+    3. When user answers, Plivo hits /plivo/answer
+    4. /plivo/answer returns <Stream> XML
+    5. Plivo connects WebSocket to /plivo/stream/{call_uuid}
+    6. AI speaks immediately (already preloaded)
     """
     logger.info(f"Plivo make call request: {request.phoneNumber}")
 
     try:
+        import uuid
+        # Generate call_uuid first (before Plivo call)
+        call_uuid = str(uuid.uuid4())
+
+        # Add customer_name to context if not present
+        context = request.context or {}
+        context.setdefault("customer_name", request.contactName)
+
+        # Store all call data
+        _pending_call_data[call_uuid] = {
+            "phone": request.phoneNumber,
+            "prompt": request.prompt,
+            "context": context,
+            "webhookUrl": request.webhookUrl
+        }
+
+        # PRELOAD Gemini session FIRST (before phone rings)
+        from src.services.plivo_gemini_stream import preload_session
+        logger.info(f"Preloading Gemini session for {call_uuid}...")
+        await preload_session(
+            call_uuid,
+            request.phoneNumber,
+            prompt=request.prompt,
+            context=context,
+            webhook_url=request.webhookUrl
+        )
+        logger.info(f"Gemini preload complete for {call_uuid} - now making call")
+
+        # NOW make the Plivo call (AI is already ready)
         result = await plivo_adapter.make_call(
             phone_number=request.phoneNumber,
             caller_name=request.contactName
         )
 
         if result.get("success"):
-            call_uuid = result.get("call_uuid")
+            # Map Plivo's UUID to our internal UUID (for preloaded session lookup)
+            plivo_uuid = result.get("call_uuid")
+            if plivo_uuid:
+                _plivo_to_internal_uuid[plivo_uuid] = call_uuid
+                _internal_to_plivo_uuid[call_uuid] = plivo_uuid
+                logger.info(f"UUID mapping: Plivo {plivo_uuid} -> Internal {call_uuid}")
 
-            # Add customer_name to context if not present
-            context = request.context or {}
-            context.setdefault("customer_name", request.contactName)
-
-            # Store all call data
-            _pending_call_data[call_uuid] = {
-                "phone": request.phoneNumber,
-                "prompt": request.prompt,
-                "context": context,
-                "webhookUrl": request.webhookUrl
-            }
-            logger.info(f"Plivo call initiated: {call_uuid}, stored phone: {request.phoneNumber}")
-
-            # PRELOAD Gemini session immediately while phone is ringing
-            from src.services.plivo_gemini_stream import preload_session
-            asyncio.create_task(preload_session(
-                call_uuid,
-                request.phoneNumber,
-                prompt=request.prompt,
-                context=context,
-                webhook_url=request.webhookUrl
-            ))
-            logger.info(f"Started preloading Gemini session for {call_uuid}")
+                # Set Plivo UUID on the preloaded session for hangup
+                from src.services.plivo_gemini_stream import set_plivo_uuid
+                set_plivo_uuid(call_uuid, plivo_uuid)
 
             return JSONResponse(content={
                 "success": True,
                 "call_uuid": call_uuid,
+                "plivo_uuid": plivo_uuid,
                 "message": f"Call initiated to {request.phoneNumber}. Waiting for user to answer."
             })
         else:
@@ -405,21 +425,25 @@ async def plivo_make_call(request: PlivoMakeCallRequest):
 async def plivo_answer(request: Request):
     """Handle Plivo call answer - uses Stream with Gemini Live"""
     body = await request.form()
-    call_uuid = body.get("CallUUID", "")
+    plivo_uuid = body.get("CallUUID", "")
     from_phone = body.get("From", "")
     to_phone = body.get("To", "")
+
+    # Look up our internal UUID from Plivo's UUID (for preloaded sessions)
+    # If not found, use Plivo's UUID (for non-preloaded calls)
+    internal_uuid = _plivo_to_internal_uuid.get(plivo_uuid, plivo_uuid)
 
     # For outbound calls, customer is "To"; for inbound, customer is "From"
     # Store the customer phone (not our Plivo number)
     customer_phone = to_phone if to_phone and not to_phone.startswith("91226") else from_phone
-    if customer_phone and call_uuid and call_uuid not in _pending_call_data:
-        _pending_call_data[call_uuid] = {"phone": customer_phone, "prompt": None, "context": {}}
+    if customer_phone and internal_uuid and internal_uuid not in _pending_call_data:
+        _pending_call_data[internal_uuid] = {"phone": customer_phone, "prompt": None, "context": {}}
 
-    logger.info(f"Plivo call answered: {call_uuid} from {from_phone} to {to_phone}, customer: {customer_phone}")
+    logger.info(f"Plivo call answered: plivo={plivo_uuid}, internal={internal_uuid}, from {from_phone} to {to_phone}")
 
-    # WebSocket URL for bidirectional audio stream
+    # WebSocket URL for bidirectional audio stream (use internal UUID for preloaded session)
     ws_base = config.plivo_callback_url.replace("https://", "wss://").replace("http://", "ws://")
-    stream_url = f"{ws_base}/plivo/stream/{call_uuid}"
+    stream_url = f"{ws_base}/plivo/stream/{internal_uuid}"
 
     logger.info(f"Stream URL: {stream_url}")
 
@@ -459,7 +483,7 @@ async def plivo_stream(websocket: WebSocket, call_uuid: str):
                 # Stream started - create Gemini session
                 start_data = message.get("start", {})
                 logger.info(f"Plivo start event data: {start_data}")
-                call_uuid = start_data.get("callId", call_uuid)
+                # Note: call_uuid in URL is already our internal UUID (from /plivo/answer)
                 # Get phone from customParameters or fallback to stored value
                 custom_params = start_data.get("customParameters", {})
                 caller_phone = custom_params.get("callerPhone", "") or start_data.get("to", "") or start_data.get("from", "")
@@ -526,11 +550,15 @@ async def plivo_stream_status(request: Request):
 async def plivo_hangup(request: Request):
     """Handle Plivo call hangup"""
     body = await request.form()
-    call_uuid = body.get("CallUUID", "")
+    plivo_uuid = body.get("CallUUID", "")
     duration = body.get("Duration", "0")
 
-    logger.info(f"Plivo call ended: {call_uuid}, duration: {duration}s")
-    clear_conversation(call_uuid)
+    # Look up internal UUID for cleanup
+    internal_uuid = _plivo_to_internal_uuid.pop(plivo_uuid, plivo_uuid)
+
+    logger.info(f"Plivo call ended: plivo={plivo_uuid}, internal={internal_uuid}, duration: {duration}s")
+    clear_conversation(internal_uuid)
+    _pending_call_data.pop(internal_uuid, None)
 
     return JSONResponse(content={"status": "ok"})
 
