@@ -32,3 +32,4 @@ dist/
 build/
 *.egg-info/
 .meta_token
+recordings/*.wav
