@@ -341,6 +341,20 @@ tar -czvf backup_$(date +%Y%m%d).tar.gz .env transcripts/ data/
 tar -xzvf backup_YYYYMMDD.tar.gz
 ```
 
+### Scheduled Cleanup (Crontab)
+
+Auto-delete old files to save disk space:
+
+```bash
+# Edit crontab
+crontab -e
+
+# Add this line (deletes files older than 7 days, runs at 2 AM daily)
+0 2 * * * find /opt/fwai/FWAI-GeminiLive/transcripts -type f -mtime +7 -delete && find /opt/fwai/FWAI-GeminiLive/recordings -type f -mtime +7 -delete
+```
+
+Verify: `crontab -l`
+
 ### Server Reboot
 
 ```bash

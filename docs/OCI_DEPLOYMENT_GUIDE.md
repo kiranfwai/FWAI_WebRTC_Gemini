@@ -406,6 +406,44 @@ ARM instances are popular. Try:
 
 ---
 
+## Scheduled Cleanup (Crontab)
+
+Automatically delete old transcripts and recordings to save disk space.
+
+### Setup Crontab
+
+```bash
+crontab -e
+```
+
+Add this line:
+```bash
+# Delete transcripts and recordings older than 7 days (runs daily at 2 AM)
+0 2 * * * find /opt/fwai/FWAI-GeminiLive/transcripts -type f -mtime +7 -delete && find /opt/fwai/FWAI-GeminiLive/recordings -type f -mtime +7 -delete
+```
+
+### Verify Crontab
+
+```bash
+crontab -l
+```
+
+### Manual Cleanup
+
+Preview files to be deleted:
+```bash
+find /opt/fwai/FWAI-GeminiLive/transcripts -type f -mtime +7
+find /opt/fwai/FWAI-GeminiLive/recordings -type f -mtime +7
+```
+
+Run cleanup manually:
+```bash
+find /opt/fwai/FWAI-GeminiLive/transcripts -type f -mtime +7 -delete
+find /opt/fwai/FWAI-GeminiLive/recordings -type f -mtime +7 -delete
+```
+
+---
+
 ## Security Recommendations
 
 1. **Use HTTPS**: Set up Nginx reverse proxy with Let's Encrypt SSL
