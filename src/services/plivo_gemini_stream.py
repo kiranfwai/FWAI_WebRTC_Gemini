@@ -308,16 +308,6 @@ class PlivoGeminiSession:
         except Exception as e:
             logger.error(f"Transcription error: {e}")
 
-    def _transcribe_recording(self, recording_file: Path):
-        """Run transcription in background thread (non-blocking)"""
-        # Run in background thread so it doesn't block call ending
-        transcribe_thread = threading.Thread(
-            target=self._transcribe_recording_sync,
-            args=(recording_file, self.call_uuid),
-            daemon=True
-        )
-        transcribe_thread.start()
-        logger.info(f"Transcription started in background for {self.call_uuid}")
 
     async def preload(self):
         """Preload the Gemini session while phone is ringing"""
@@ -748,20 +738,47 @@ IMPORTANT: Maintain this Indian English accent consistently for EVERY response. 
             self._session_task.cancel()
         self._save_transcript("SYSTEM", "Call ended")
 
-        # Stop recording thread and save recording
+        # Stop recording thread
         if self._recording_queue:
             self._recording_queue.put(None)  # Shutdown signal
         if self._recording_thread:
             self._recording_thread.join(timeout=2.0)
 
-        # Save recording and transcribe in background
-        recording_file = self._save_recording()
-        if recording_file:
-            self._transcribe_recording(recording_file)
+        # Process recording and transcription in COMPLETELY SEPARATE background thread
+        # This does NOT block call ending - call ends immediately
+        # Webhook is called AFTER transcription is complete
+        self._start_post_call_processing(duration)
 
-        # Call webhook URL to notify n8n that call ended
-        if self.webhook_url:
-            asyncio.create_task(self._call_webhook(duration))
+    def _start_post_call_processing(self, duration: float):
+        """Run all post-call processing (save, transcribe, webhook) in background thread"""
+        def process_in_background():
+            try:
+                # Step 1: Save recording
+                recording_file = self._save_recording()
+
+                # Step 2: Transcribe (takes time, but doesn't block anything)
+                if recording_file:
+                    self._transcribe_recording_sync(recording_file, self.call_uuid)
+
+                # Step 3: Call webhook AFTER transcription is done
+                if self.webhook_url:
+                    import asyncio
+                    # Create new event loop for this thread
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(self._call_webhook(duration))
+                    finally:
+                        loop.close()
+
+                logger.info(f"Post-call processing complete for {self.call_uuid}")
+            except Exception as e:
+                logger.error(f"Post-call processing error: {e}")
+
+        # Start background thread - call ends immediately, this runs separately
+        processing_thread = threading.Thread(target=process_in_background, daemon=True)
+        processing_thread.start()
+        logger.info(f"Post-call processing started in background for {self.call_uuid}")
 
     async def _call_webhook(self, duration: float):
         """Call webhook URL to notify n8n that call ended"""
