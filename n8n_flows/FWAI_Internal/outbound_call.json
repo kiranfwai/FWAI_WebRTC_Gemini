@@ -18,7 +18,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://abby-pseudolateral-nonmountainously.ngrok-free.dev/plivo/make-call",
+        "url": "http://140.245.206.162:3000/plivo/make-call",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
