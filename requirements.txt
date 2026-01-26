@@ -1,28 +1,56 @@
-# WhatsApp Voice Calling with Gemini Live - Python Implementation
-# Using versions with pre-built Windows wheels
+# FWAI Voice AI Agent - Python Dependencies
+# For Oracle Cloud / Linux deployment
 
-# Web framework
-fastapi==0.109.0
-uvicorn==0.27.0
-
-# WebRTC - specific version with Windows wheels
-aiortc==1.5.0
-
-# HTTP client
-httpx==0.26.0
-
-# WebSocket client
-websockets==12.0
-
-# Audio processing
-numpy==1.26.3
-
-# Environment and utilities
-python-dotenv==1.0.0
-
-# Logging
-loguru==0.7.2
+# =============================================================================
+# Web Framework
+# =============================================================================
+fastapi>=0.109.0
+uvicorn>=0.27.0
 python-multipart
+
+# =============================================================================
+# WebRTC & Audio
+# =============================================================================
+aiortc>=1.5.0
+av>=14.0.0
+
+# =============================================================================
+# Audio Processing
+# =============================================================================
+numpy>=1.26.3
+scipy
+
+# =============================================================================
+# HTTP & WebSocket Clients
+# =============================================================================
+httpx>=0.26.0
+websockets>=12.0
+
+# =============================================================================
+# Google Gemini AI
+# =============================================================================
 google-generativeai
 google-genai>=1.0.0
-openai-whisper
+
+# =============================================================================
+# Environment & Configuration
+# =============================================================================
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+
+# =============================================================================
+# Logging
+# =============================================================================
+loguru>=0.7.2
+
+# =============================================================================
+# Transcription (Optional - uses more RAM)
+# =============================================================================
+# Uncomment below if you need local Whisper transcription
+# Note: Requires 2GB+ RAM, skip on 1GB servers
+# openai-whisper
+
+# =============================================================================
+# For Windows Development (optional)
+# =============================================================================
+# pyaudio  # Uncomment for local mic testing on Windows
