@@ -287,12 +287,21 @@ class PlivoGeminiSession:
 
             logger.info(f"Transcription complete for {call_uuid}")
 
-            # Delete recording file after successful transcription
+            # Compress recording file to save space (WAV -> MP3)
             try:
-                recording_file.unlink()
-                logger.info(f"Recording deleted: {recording_file}")
+                import subprocess
+                mp3_file = recording_file.with_suffix('.mp3')
+                result = subprocess.run(
+                    ['ffmpeg', '-y', '-i', str(recording_file), '-b:a', '32k', str(mp3_file)],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    recording_file.unlink()  # Delete original WAV
+                    logger.info(f"Recording compressed: {mp3_file}")
+                else:
+                    logger.warning(f"Compression failed, keeping WAV: {result.stderr}")
             except Exception as e:
-                logger.warning(f"Could not delete recording: {e}")
+                logger.warning(f"Could not compress recording: {e}")
 
         except ImportError:
             logger.warning("Whisper not installed. Run: pip install openai-whisper")
