@@ -546,7 +546,10 @@ IMPORTANT: Maintain this Indian English accent consistently for EVERY response. 
         """Hang up the call after a delay to let goodbye audio play"""
         try:
             await asyncio.sleep(delay)
-            logger.info(f"Hanging up call {self.call_uuid}")
+
+            # Use Plivo's UUID if available, otherwise fall back to internal UUID
+            hangup_uuid = self.plivo_call_uuid or self.call_uuid
+            logger.info(f"Hanging up call {self.call_uuid} using UUID: {hangup_uuid} (plivo_uuid={self.plivo_call_uuid})")
 
             # Use Plivo REST API directly with httpx (async)
             import httpx
@@ -555,8 +558,6 @@ IMPORTANT: Maintain this Indian English accent consistently for EVERY response. 
             auth_string = f"{config.plivo_auth_id}:{config.plivo_auth_token}"
             auth_b64 = base64.b64encode(auth_string.encode()).decode()
 
-            # Use Plivo's UUID if available, otherwise fall back to internal UUID
-            hangup_uuid = self.plivo_call_uuid or self.call_uuid
             url = f"https://api.plivo.com/v1/Account/{config.plivo_auth_id}/Call/{hangup_uuid}/"
 
             async with httpx.AsyncClient() as client:
@@ -821,6 +822,10 @@ def set_plivo_uuid(internal_uuid: str, plivo_uuid: str):
     if session:
         session.plivo_call_uuid = plivo_uuid
         logger.info(f"Set Plivo UUID {plivo_uuid} on session {internal_uuid}")
+    else:
+        logger.error(f"CRITICAL: Could not find session {internal_uuid} to set Plivo UUID {plivo_uuid}. Call hangup will fail!")
+        logger.error(f"  _preloading_sessions keys: {list(_preloading_sessions.keys())}")
+        logger.error(f"  _sessions keys: {list(_sessions.keys())}")
 
 async def preload_session(call_uuid: str, caller_phone: str, prompt: str = None, context: dict = None, webhook_url: str = None) -> bool:
     """Preload a session while phone is ringing"""

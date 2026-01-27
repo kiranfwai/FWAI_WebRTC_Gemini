@@ -398,6 +398,10 @@ async def plivo_make_call(request: PlivoMakeCallRequest):
                 _internal_to_plivo_uuid[call_uuid] = plivo_uuid
                 logger.info(f"UUID mapping: Plivo {plivo_uuid} -> Internal {call_uuid}")
 
+                # Store Plivo UUID in pending data (fallback for WebSocket handler)
+                if call_uuid in _pending_call_data:
+                    _pending_call_data[call_uuid]["plivo_uuid"] = plivo_uuid
+
                 # Set Plivo UUID on the preloaded session for hangup
                 from src.services.plivo_gemini_stream import set_plivo_uuid
                 set_plivo_uuid(call_uuid, plivo_uuid)
@@ -502,6 +506,16 @@ async def plivo_stream(websocket: WebSocket, call_uuid: str):
 
                 if session:
                     logger.info(f"Gemini Live session created for {call_uuid}")
+                    # Ensure Plivo UUID is set (fallback if set_plivo_uuid missed it)
+                    if not session.plivo_call_uuid:
+                        # Try to get from pending call data or mapping
+                        call_data = _pending_call_data.get(call_uuid, {})
+                        plivo_uuid = call_data.get("plivo_uuid") or _internal_to_plivo_uuid.get(call_uuid)
+                        if plivo_uuid:
+                            session.plivo_call_uuid = plivo_uuid
+                            logger.info(f"Set Plivo UUID {plivo_uuid} on session {call_uuid} (fallback)")
+                        else:
+                            logger.warning(f"Could not find Plivo UUID for session {call_uuid} - hangup may fail")
                 else:
                     logger.error(f"Failed to create Gemini session for {call_uuid}")
 
