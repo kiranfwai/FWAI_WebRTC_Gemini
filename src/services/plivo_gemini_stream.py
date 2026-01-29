@@ -30,95 +30,29 @@ def load_default_prompt():
 
 DEFAULT_PROMPT = load_default_prompt()
 
-# Tool definitions for Gemini Live
+# Tool definitions for Gemini Live (minimal for lower latency)
 TOOL_DECLARATIONS = [
     {
         "name": "send_whatsapp",
-        "description": """Send a beautifully formatted WhatsApp message to the caller.
-ALWAYS use a template when possible - they look professional and contain all needed info.
-
-Choose template based on what user is asking:
-
-📚 template_id='course_details' - USE WHEN:
-   • User asks "what's included?", "tell me more", "what will I learn?"
-   • User wants to know about features, curriculum, benefits
-   • User asks about pricing or what they get
-
-💳 template_id='payment_link' - USE WHEN:
-   • User says "I want to join", "how do I pay?", "I'm ready"
-   • User asks for payment link or enrollment link
-   • User confirms they want to purchase
-
-🆘 template_id='support_contact' - USE WHEN:
-   • User has a problem, complaint, or issue
-   • User says "I need help", "something's not working"
-   • User is frustrated or needs customer support
-
-Only use custom_message for very specific requests that don't fit any template.""",
+        "description": "Send WhatsApp message. Use template_id: 'course_details' (info), 'payment_link' (buy), 'support_contact' (help). Or custom_message if needed.",
         "parameters": {
             "type": "object",
             "properties": {
                 "template_id": {
                     "type": "string",
-                    "description": "Template ID: 'course_details' (info/features), 'payment_link' (ready to buy), or 'support_contact' (help/issues)",
                     "enum": ["course_details", "payment_link", "support_contact"]
                 },
-                "custom_message": {
-                    "type": "string",
-                    "description": "Custom message - ONLY use if no template fits the situation"
-                }
-            },
-            "required": []
-        }
-    },
-    {
-        "name": "schedule_callback",
-        "description": "Schedule a callback for the caller at their preferred time. Use this when the user wants to be called back later.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "preferred_time": {
-                    "type": "string",
-                    "description": "Preferred callback time (e.g., 'tomorrow morning', '3 PM today', 'Monday 10 AM')"
-                },
-                "notes": {
-                    "type": "string",
-                    "description": "Any notes about what to discuss on callback"
-                }
-            },
-            "required": ["preferred_time"]
-        }
-    },
-    {
-        "name": "send_sms",
-        "description": "Send an SMS message to the caller with brief information. Use this when user prefers SMS over WhatsApp.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "The SMS message content (keep it brief)"
-                }
-            },
-            "required": ["message"]
+                "custom_message": {"type": "string"}
+            }
         }
     },
     {
         "name": "end_call",
-        "description": """End the phone call gracefully. USE THIS TOOL WHEN:
-- User says 'bye', 'bye bye', 'goodbye', 'talk later', 'gotta go', 'thanks bye'
-- User indicates they want to end the conversation
-- You have said your goodbye and the conversation is naturally ending
-- The call time limit has been reached
-
-IMPORTANT: Always say a warm goodbye BEFORE calling this tool, then call it to actually hang up.""",
+        "description": "End call when user says bye/goodbye. Say goodbye first, then call this.",
         "parameters": {
             "type": "object",
             "properties": {
-                "reason": {
-                    "type": "string",
-                    "description": "Reason for ending call (e.g., 'user said goodbye', 'conversation complete', 'time limit')"
-                }
+                "reason": {"type": "string"}
             },
             "required": ["reason"]
         }
@@ -253,7 +187,11 @@ class PlivoGeminiSession:
             return None
 
     def _transcribe_recording_sync(self, recording_file: Path, call_uuid: str):
-        """Transcribe recording using Whisper (runs in background thread)"""
+        """Transcribe recording using Whisper (runs in background thread)
+
+        Note: Speaker-labeled transcript is already captured during the live call
+        via _save_transcript(). This just adds a raw Whisper transcription for reference.
+        """
         try:
             import whisper
             logger.info(f"Starting background transcription for {call_uuid}")
@@ -261,29 +199,11 @@ class PlivoGeminiSession:
             result = model.transcribe(str(recording_file))
             transcript_text = result["text"].strip()
 
-            # Format transcript with speaker labels based on conversation pattern
-            # Agent speaks first, then alternates with user
-            formatted_lines = []
-            sentences = [s.strip() for s in transcript_text.replace('?', '?|').replace('.', '.|').replace('!', '!|').split('|') if s.strip()]
-
-            is_agent = True  # Agent starts first
-            for sentence in sentences:
-                if not sentence:
-                    continue
-                speaker = "AGENT" if is_agent else "USER"
-                formatted_lines.append(f"{speaker}: {sentence}")
-                # Simple heuristic: questions from agent, short responses from user
-                if '?' in sentence or len(sentence) > 80:
-                    is_agent = False  # Next is likely user response
-                else:
-                    is_agent = True  # Next is likely agent
-
-            # Save formatted transcript
+            # Save raw Whisper transcript (speaker labels already captured during live call)
             transcript_file = Path(__file__).parent.parent.parent / "transcripts" / f"{call_uuid}.txt"
             with open(transcript_file, "a") as f:
-                f.write(f"\n--- CONVERSATION TRANSCRIPT ---\n")
-                for line in formatted_lines:
-                    f.write(f"{line}\n")
+                f.write(f"\n--- RAW WHISPER TRANSCRIPTION ---\n")
+                f.write(f"{transcript_text}\n")
 
             logger.info(f"Transcription complete for {call_uuid}")
 
@@ -408,30 +328,8 @@ class PlivoGeminiSession:
             logger.info("Google Live session ended")
 
     async def _send_session_setup(self):
-        # Accent/speech instructions FIRST (before main prompt)
-        accent_instruction = """MANDATORY VOICE INSTRUCTIONS - FOLLOW STRICTLY:
-
-1. ACCENT: You MUST speak with a strong Indian English accent throughout the ENTIRE conversation.
-   - Sound exactly like an educated Indian professional from Bangalore or Mumbai
-   - Use Indian English pronunciation patterns (e.g., pronounce "schedule" as "shed-yool", "process" as "pro-sess")
-   - Use Indian English intonation - rising tone at end of statements
-   - Use syllable-timed rhythm (equal stress on each syllable)
-
-2. LANGUAGE: Speak ONLY in English.
-   - Do NOT use ANY Hindi words (no "achha", "haan", "theek hai", "na", "ji")
-   - Use only English words and phrases
-
-3. SPEECH PATTERNS: Use Indian English phrases naturally:
-   - "Actually, what I was saying is..."
-   - "Basically, the thing is..."
-   - "You see, the point is..."
-   - "Isn't it?", "No?", "Right?" at end of sentences
-   - "I'll just tell you one thing..."
-   - "What happens is..."
-
-4. TONE: Be warm, friendly, professional, and enthusiastic like an Indian sales professional.
-
-IMPORTANT: Maintain this Indian English accent consistently for EVERY response. Never switch to American or British accent.
+        # Concise accent instruction (shorter = faster responses)
+        accent_instruction = """VOICE: Indian English accent (Bangalore professional). Use "Actually...", "Basically...", "Isn't it?" naturally. English only, no Hindi. Warm and professional tone.
 
 """
         # Combine: accent first, then main prompt
@@ -507,7 +405,7 @@ IMPORTANT: Maintain this Indian English accent consistently for EVERY response. 
                     pass
 
                 # Hang up the call after a short delay (let goodbye audio play)
-                asyncio.create_task(self._hangup_call_delayed(3.0))
+                asyncio.create_task(self._hangup_call_delayed(1.0))
                 return
 
             # Execute the tool with context for templates - graceful error handling
