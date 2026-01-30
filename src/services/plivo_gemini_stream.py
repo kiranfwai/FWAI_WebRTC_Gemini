@@ -98,6 +98,22 @@ class PlivoGeminiSession:
         self._timeout_task = None
         self._closing_call = False  # Flag to indicate we're closing the call
 
+    def _is_goodbye_message(self, text: str) -> bool:
+        """Detect if agent is saying goodbye - triggers auto call end"""
+        text_lower = text.lower()
+        # Check for goodbye patterns at end of agent's message
+        goodbye_phrases = [
+            'bye', 'goodbye', 'good bye', 'take care', 'talk later',
+            'have a great day', 'have a nice day', 'have a good day',
+            'thanks for calling', 'thank you for calling',
+            'nice talking', 'great talking', 'good talking',
+            'catch you later', 'see you', 'talk soon'
+        ]
+        for phrase in goodbye_phrases:
+            if phrase in text_lower:
+                return True
+        return False
+
     def _save_transcript(self, role, text):
         if not config.enable_transcripts:
             return
@@ -601,6 +617,12 @@ class PlivoGeminiSession:
                             )
                             if ai_text and not is_thinking and len(ai_text) > 3:
                                 self._save_transcript("AGENT", ai_text)
+                                # AUTO-END: If agent says bye/goodbye, end call immediately
+                                # This is a backup - doesn't rely on Gemini calling end_call tool
+                                if not self._closing_call and self._is_goodbye_message(ai_text):
+                                    logger.info(f"AGENT said goodbye - auto-ending call: {ai_text[:50]}")
+                                    self._closing_call = True
+                                    asyncio.create_task(self._hangup_call_delayed(0.5))
         except Exception as e:
             logger.error(f"Error processing Google message: {e} - continuing session")
 
