@@ -48,7 +48,7 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "end_call",
-        "description": "End call IMMEDIATELY when user wants to disconnect. Triggers: 'bye', 'goodbye', 'hang up', 'disconnect', 'end call', 'gotta go', 'need to go', 'talk later', 'not interested', 'stop calling', 'I'm busy', 'no thanks', or ANY indication they want to end. Say brief goodbye THEN call this tool - do NOT continue conversation.",
+        "description": "End call. MUST call after: 1) YOU say bye/goodbye/take care 2) User says bye/goodbye/not interested 3) Conversation naturally complete. CRITICAL: After saying goodbye, call this tool IMMEDIATELY - do NOT wait for user response.",
         "parameters": {
             "type": "object",
             "properties": {
