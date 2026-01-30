@@ -151,12 +151,12 @@ def format_report(stats: dict, short: bool = False) -> str:
     """
     if short:
         # SMS version (shorter, no emojis for better compatibility)
-        return f"""FWAI Daily Report - {stats['date']}
+        return f"""FWAI AI Calling Report - {stats['date']}
 Calls: {stats['total_calls']} | Duration: {stats['total_duration_mins']} mins | Avg: {stats['avg_duration_secs']} secs
 - Freedom with AI"""
 
     # Full version for WhatsApp
-    return f"""📈 FWAI Daily Performance Report
+    return f"""📈 FWAI Daily AI Calling Report
 
 Date: {stats['date']}
 ━━━━━━━━━━━━━━━━━━━━━━━━
