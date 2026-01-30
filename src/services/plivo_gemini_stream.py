@@ -191,103 +191,76 @@ class PlivoGeminiSession:
         return struct.pack(f'<{len(samples_16k)}h', *samples_16k)
 
     def _save_recording(self):
-        """Save separate USER and AGENT audio files for speaker-labeled transcription"""
+        """Save single MP3 recording file"""
         logger.info(f"Saving recording: enabled={self.recording_enabled}, chunks={len(self.audio_chunks)}")
         if not self.recording_enabled or not self.audio_chunks:
             logger.warning(f"Skipping recording: enabled={self.recording_enabled}, chunks={len(self.audio_chunks)}")
             return None
         try:
-            # Separate audio by speaker
-            user_audio = bytearray()
-            agent_audio = bytearray()
+            import subprocess
             combined_audio = bytearray()
 
             for role, audio_bytes, sample_rate in self.audio_chunks:
                 if sample_rate == 24000:
-                    # Resample AI audio from 24kHz to 16kHz
                     audio_bytes = self._resample_24k_to_16k(audio_bytes)
-
                 combined_audio.extend(audio_bytes)
-                if role == "USER":
-                    user_audio.extend(audio_bytes)
-                elif role == "AI":
-                    agent_audio.extend(audio_bytes)
 
-            # Save combined audio (for playback)
-            recording_file = RECORDINGS_DIR / f"{self.call_uuid}.wav"
-            with wave.open(str(recording_file), 'wb') as wav:
+            # Save as temporary WAV
+            temp_wav = RECORDINGS_DIR / f"{self.call_uuid}_temp.wav"
+            with wave.open(str(temp_wav), 'wb') as wav:
                 wav.setnchannels(1)
                 wav.setsampwidth(2)
                 wav.setframerate(16000)
                 wav.writeframes(bytes(combined_audio))
 
-            # Save USER audio separately (for transcription)
-            if user_audio:
-                user_file = RECORDINGS_DIR / f"{self.call_uuid}_user.wav"
-                with wave.open(str(user_file), 'wb') as wav:
-                    wav.setnchannels(1)
-                    wav.setsampwidth(2)
-                    wav.setframerate(16000)
-                    wav.writeframes(bytes(user_audio))
-                logger.info(f"User audio saved: {user_file}")
-
-            # Save AGENT audio separately (for transcription)
-            if agent_audio:
-                agent_file = RECORDINGS_DIR / f"{self.call_uuid}_agent.wav"
-                with wave.open(str(agent_file), 'wb') as wav:
-                    wav.setnchannels(1)
-                    wav.setsampwidth(2)
-                    wav.setframerate(16000)
-                    wav.writeframes(bytes(agent_audio))
-                logger.info(f"Agent audio saved: {agent_file}")
-
-            logger.info(f"Recording saved: {recording_file} ({len(combined_audio)} bytes)")
-            return recording_file
+            # Convert to MP3 (single file)
+            mp3_file = RECORDINGS_DIR / f"{self.call_uuid}.mp3"
+            try:
+                result = subprocess.run(
+                    ['ffmpeg', '-y', '-i', str(temp_wav), '-b:a', '32k', str(mp3_file)],
+                    capture_output=True, text=True, timeout=30
+                )
+                if result.returncode == 0:
+                    temp_wav.unlink()
+                    logger.info(f"Recording saved as MP3: {mp3_file}")
+                    return mp3_file
+                else:
+                    logger.warning(f"MP3 conversion failed: {result.stderr}")
+                    wav_file = RECORDINGS_DIR / f"{self.call_uuid}.wav"
+                    temp_wav.rename(wav_file)
+                    return wav_file
+            except Exception as e:
+                logger.warning(f"MP3 conversion error: {e}")
+                wav_file = RECORDINGS_DIR / f"{self.call_uuid}.wav"
+                temp_wav.rename(wav_file)
+                return wav_file
         except Exception as e:
             logger.error(f"Error saving recording: {e}")
             return None
 
     def _transcribe_recording_sync(self, recording_file: Path, call_uuid: str):
-        """Transcribe recording using Whisper (runs in background thread)
-
-        Note: Speaker-labeled transcript is already captured during the live call
-        via _save_transcript(). This just adds a raw Whisper transcription for reference.
-        """
+        """Transcribe recording using Whisper (runs in background thread)"""
         try:
             import whisper
-            logger.info(f"Starting background transcription for {call_uuid}")
-            model = whisper.load_model("tiny")  # Use tiny for faster transcription
+            logger.info(f"Starting Whisper transcription for {call_uuid}")
+            model = whisper.load_model("tiny")
             result = model.transcribe(str(recording_file))
             transcript_text = result["text"].strip()
 
-            # Save raw Whisper transcript (speaker labels already captured during live call)
+            # Append Whisper transcript to file
             transcript_file = Path(__file__).parent.parent.parent / "transcripts" / f"{call_uuid}.txt"
             with open(transcript_file, "a") as f:
-                f.write(f"\n--- RAW WHISPER TRANSCRIPTION ---\n")
+                f.write(f"\n--- WHISPER TRANSCRIPTION ---\n")
                 f.write(f"{transcript_text}\n")
 
-            logger.info(f"Transcription complete for {call_uuid}")
-
-            # Compress recording file to save space (WAV -> MP3)
-            try:
-                import subprocess
-                mp3_file = recording_file.with_suffix('.mp3')
-                result = subprocess.run(
-                    ['ffmpeg', '-y', '-i', str(recording_file), '-b:a', '32k', str(mp3_file)],
-                    capture_output=True, text=True
-                )
-                if result.returncode == 0:
-                    recording_file.unlink()  # Delete original WAV
-                    logger.info(f"Recording compressed: {mp3_file}")
-                else:
-                    logger.warning(f"Compression failed, keeping WAV: {result.stderr}")
-            except Exception as e:
-                logger.warning(f"Could not compress recording: {e}")
-
+            logger.info(f"Transcription complete for {call_uuid}: {len(transcript_text)} chars")
+            return transcript_text
         except ImportError:
-            logger.warning("Whisper not installed. Run: pip install openai-whisper")
+            logger.warning("Whisper not installed")
+            return ""
         except Exception as e:
             logger.error(f"Transcription error: {e}")
+            return ""
 
 
     async def preload(self):
