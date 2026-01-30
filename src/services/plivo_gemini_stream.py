@@ -158,27 +158,55 @@ class PlivoGeminiSession:
         return struct.pack(f'<{len(samples_16k)}h', *samples_16k)
 
     def _save_recording(self):
-        """Save combined recording as WAV file"""
+        """Save separate USER and AGENT audio files for speaker-labeled transcription"""
         logger.info(f"Saving recording: enabled={self.recording_enabled}, chunks={len(self.audio_chunks)}")
         if not self.recording_enabled or not self.audio_chunks:
             logger.warning(f"Skipping recording: enabled={self.recording_enabled}, chunks={len(self.audio_chunks)}")
             return None
         try:
-            recording_file = RECORDINGS_DIR / f"{self.call_uuid}.wav"
+            # Separate audio by speaker
+            user_audio = bytearray()
+            agent_audio = bytearray()
             combined_audio = bytearray()
 
             for role, audio_bytes, sample_rate in self.audio_chunks:
                 if sample_rate == 24000:
                     # Resample AI audio from 24kHz to 16kHz
                     audio_bytes = self._resample_24k_to_16k(audio_bytes)
-                combined_audio.extend(audio_bytes)
 
-            # Write WAV file (16kHz, mono, 16-bit)
+                combined_audio.extend(audio_bytes)
+                if role == "USER":
+                    user_audio.extend(audio_bytes)
+                elif role == "AI":
+                    agent_audio.extend(audio_bytes)
+
+            # Save combined audio (for playback)
+            recording_file = RECORDINGS_DIR / f"{self.call_uuid}.wav"
             with wave.open(str(recording_file), 'wb') as wav:
                 wav.setnchannels(1)
-                wav.setsampwidth(2)  # 16-bit
+                wav.setsampwidth(2)
                 wav.setframerate(16000)
                 wav.writeframes(bytes(combined_audio))
+
+            # Save USER audio separately (for transcription)
+            if user_audio:
+                user_file = RECORDINGS_DIR / f"{self.call_uuid}_user.wav"
+                with wave.open(str(user_file), 'wb') as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(16000)
+                    wav.writeframes(bytes(user_audio))
+                logger.info(f"User audio saved: {user_file}")
+
+            # Save AGENT audio separately (for transcription)
+            if agent_audio:
+                agent_file = RECORDINGS_DIR / f"{self.call_uuid}_agent.wav"
+                with wave.open(str(agent_file), 'wb') as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(16000)
+                    wav.writeframes(bytes(agent_audio))
+                logger.info(f"Agent audio saved: {agent_file}")
 
             logger.info(f"Recording saved: {recording_file} ({len(combined_audio)} bytes)")
             return recording_file
