@@ -55,7 +55,7 @@ logger.add(
     level="DEBUG" if config.debug else "INFO"
 )
 logger.add(
-    Path(__file__).parent.parent / "logs" / "whatsapp_voice.log",
+    Path(__file__).parent.parent / "logs" / "fwai_voice.log",
     rotation="10 MB",
     retention="7 days",
     level="DEBUG"
@@ -552,11 +552,8 @@ async def plivo_stream(websocket: WebSocket, call_uuid: str):
 async def plivo_stream_status(request: Request):
     """Handle Plivo stream status callbacks"""
     body = await request.form()
-    logger.info("=" * 60)
-    logger.info("PLIVO STREAM STATUS CALLBACK")
-    for key in body.keys():
-        logger.info(f"  {key}: {body.get(key)}")
-    logger.info("=" * 60)
+    # Reduced logging - was firing 50+ times per call
+    logger.debug(f"Plivo stream status: {dict(body)}")
     return JSONResponse(content={"status": "ok"})
 
 

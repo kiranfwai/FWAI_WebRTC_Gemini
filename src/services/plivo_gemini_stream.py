@@ -6,6 +6,7 @@ import wave
 import struct
 import threading
 import queue
+import time
 from typing import Dict, Optional
 from loguru import logger
 from datetime import datetime
@@ -13,6 +14,9 @@ from pathlib import Path
 import websockets
 from src.core.config import config
 from src.tools import execute_tool
+
+# Latency threshold - only log if slower than this (ms)
+LATENCY_THRESHOLD_MS = 500
 
 # Recording directory
 RECORDINGS_DIR = Path(__file__).parent.parent.parent / "recordings"
@@ -31,24 +35,11 @@ def load_default_prompt():
 DEFAULT_PROMPT = load_default_prompt()
 
 # Tool definitions for Gemini Live (minimal for lower latency)
+# NOTE: WhatsApp messaging disabled during calls to reduce latency/interruptions
 TOOL_DECLARATIONS = [
     {
-        "name": "send_whatsapp",
-        "description": "Send WhatsApp message. Use template_id: 'course_details' (info), 'payment_link' (buy), 'support_contact' (help). Or custom_message if needed.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "template_id": {
-                    "type": "string",
-                    "enum": ["course_details", "payment_link", "support_contact"]
-                },
-                "custom_message": {"type": "string"}
-            }
-        }
-    },
-    {
         "name": "end_call",
-        "description": "End call. MUST call after: 1) YOU say bye/goodbye/take care 2) User says bye/goodbye/not interested 3) Conversation naturally complete. CRITICAL: After saying goodbye, call this tool IMMEDIATELY - do NOT wait for user response.",
+        "description": "End call. MUST call after BOTH you AND user have said goodbye. Wait for mutual farewell before calling this.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -98,6 +89,13 @@ class PlivoGeminiSession:
         self._timeout_task = None
         self._closing_call = False  # Flag to indicate we're closing the call
 
+        # Goodbye tracking - call ends only when both parties say goodbye
+        self.user_said_goodbye = False
+        self.agent_said_goodbye = False
+
+        # Latency tracking - only logs if > threshold
+        self._last_user_speech_time = None
+
     def _is_goodbye_message(self, text: str) -> bool:
         """Detect if agent is saying goodbye - triggers auto call end"""
         text_lower = text.lower()
@@ -131,6 +129,14 @@ class PlivoGeminiSession:
                 return True
         return False
 
+    def _check_mutual_goodbye(self):
+        """End call only when both user and agent have said goodbye"""
+        if self.user_said_goodbye and self.agent_said_goodbye and not self._closing_call:
+            logger.info(f"MUTUAL GOODBYE detected - ending call (user={self.user_said_goodbye}, agent={self.agent_said_goodbye})")
+            self._closing_call = True
+            # Give 2 seconds for final audio to play before hanging up
+            asyncio.create_task(self._hangup_call_delayed(2.0))
+
     def _save_transcript(self, role, text):
         if not config.enable_transcripts:
             return
@@ -141,7 +147,7 @@ class PlivoGeminiSession:
             timestamp = datetime.now().strftime("%H:%M:%S")
             with open(transcript_file, "a") as f:
                 f.write(f"[{timestamp}] {role}: {text}\n")
-            logger.info(f"TRANSCRIPT [{role}]: {text}")
+            logger.debug(f"TRANSCRIPT [{role}]: {text}")
         except Exception as e:
             logger.error(f"Error saving transcript: {e}")
 
@@ -167,9 +173,10 @@ class PlivoGeminiSession:
         """Record audio chunk for post-call transcription (non-blocking)"""
         if not self.recording_enabled or not self._recording_queue:
             return
-        # Put in queue - non-blocking, doesn't affect call latency
+        # Put in queue with timestamp - non-blocking, doesn't affect call latency
         try:
-            self._recording_queue.put_nowait((role, audio_bytes, sample_rate))
+            timestamp = time.time()  # ~0.001ms, negligible
+            self._recording_queue.put_nowait((role, audio_bytes, sample_rate, timestamp))
         except queue.Full:
             pass  # Drop frame if queue is full (shouldn't happen)
 
@@ -191,76 +198,120 @@ class PlivoGeminiSession:
         return struct.pack(f'<{len(samples_16k)}h', *samples_16k)
 
     def _save_recording(self):
-        """Save single MP3 recording file"""
+        """Save separate user/agent WAV files for speaker-separated transcription"""
         logger.info(f"Saving recording: enabled={self.recording_enabled}, chunks={len(self.audio_chunks)}")
         if not self.recording_enabled or not self.audio_chunks:
             logger.warning(f"Skipping recording: enabled={self.recording_enabled}, chunks={len(self.audio_chunks)}")
             return None
         try:
             import subprocess
-            combined_audio = bytearray()
 
-            for role, audio_bytes, sample_rate in self.audio_chunks:
+            # Separate audio by speaker
+            user_audio = bytearray()
+            agent_audio = bytearray()
+            user_start_time = None
+            agent_start_time = None
+
+            for chunk in self.audio_chunks:
+                role, audio_bytes, sample_rate, timestamp = chunk
                 if sample_rate == 24000:
                     audio_bytes = self._resample_24k_to_16k(audio_bytes)
-                combined_audio.extend(audio_bytes)
 
-            # Save as temporary WAV
-            temp_wav = RECORDINGS_DIR / f"{self.call_uuid}_temp.wav"
-            with wave.open(str(temp_wav), 'wb') as wav:
-                wav.setnchannels(1)
-                wav.setsampwidth(2)
-                wav.setframerate(16000)
-                wav.writeframes(bytes(combined_audio))
+                if role == "USER":
+                    if user_start_time is None:
+                        user_start_time = timestamp
+                    user_audio.extend(audio_bytes)
+                else:  # AI/AGENT
+                    if agent_start_time is None:
+                        agent_start_time = timestamp
+                    agent_audio.extend(audio_bytes)
 
-            # Convert to MP3 (single file)
-            mp3_file = RECORDINGS_DIR / f"{self.call_uuid}.mp3"
-            try:
-                result = subprocess.run(
-                    ['ffmpeg', '-y', '-i', str(temp_wav), '-b:a', '32k', str(mp3_file)],
-                    capture_output=True, text=True, timeout=30
-                )
-                if result.returncode == 0:
-                    temp_wav.unlink()
-                    logger.info(f"Recording saved as MP3: {mp3_file}")
-                    return mp3_file
-                else:
-                    logger.warning(f"MP3 conversion failed: {result.stderr}")
-                    wav_file = RECORDINGS_DIR / f"{self.call_uuid}.wav"
-                    temp_wav.rename(wav_file)
-                    return wav_file
-            except Exception as e:
-                logger.warning(f"MP3 conversion error: {e}")
-                wav_file = RECORDINGS_DIR / f"{self.call_uuid}.wav"
-                temp_wav.rename(wav_file)
-                return wav_file
+            # Save user audio
+            user_wav = RECORDINGS_DIR / f"{self.call_uuid}_user.wav"
+            if user_audio:
+                with wave.open(str(user_wav), 'wb') as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(16000)
+                    wav.writeframes(bytes(user_audio))
+
+            # Save agent audio
+            agent_wav = RECORDINGS_DIR / f"{self.call_uuid}_agent.wav"
+            if agent_audio:
+                with wave.open(str(agent_wav), 'wb') as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(16000)
+                    wav.writeframes(bytes(agent_audio))
+
+            logger.info(f"Recordings saved: user={len(user_audio)}bytes, agent={len(agent_audio)}bytes")
+
+            # Return paths and start times for transcription
+            return {
+                "user_wav": user_wav if user_audio else None,
+                "agent_wav": agent_wav if agent_audio else None,
+                "user_start": user_start_time,
+                "agent_start": agent_start_time
+            }
         except Exception as e:
             logger.error(f"Error saving recording: {e}")
             return None
 
-    def _transcribe_recording_sync(self, recording_file: Path, call_uuid: str):
-        """Transcribe recording using Whisper (runs in background thread)"""
+    def _transcribe_recording_sync(self, recording_info: dict, call_uuid: str):
+        """Transcribe user/agent recordings separately and merge by timestamp"""
         try:
             import whisper
             logger.info(f"Starting Whisper transcription for {call_uuid}")
             model = whisper.load_model("tiny")
-            result = model.transcribe(str(recording_file))
-            transcript_text = result["text"].strip()
 
-            # Append Whisper transcript to file
-            transcript_file = Path(__file__).parent.parent.parent / "transcripts" / f"{call_uuid}.txt"
-            with open(transcript_file, "a") as f:
-                f.write(f"\n--- WHISPER TRANSCRIPTION ---\n")
-                f.write(f"{transcript_text}\n")
+            segments = []  # List of (absolute_time, role, text)
 
-            logger.info(f"Transcription complete for {call_uuid}: {len(transcript_text)} chars")
-            return transcript_text
+            # Transcribe user audio
+            if recording_info.get("user_wav") and recording_info["user_wav"].exists():
+                user_start = recording_info.get("user_start", 0) or 0
+                result = model.transcribe(str(recording_info["user_wav"]))
+                for seg in result.get("segments", []):
+                    abs_time = user_start + seg["start"]
+                    text = seg["text"].strip()
+                    if text:
+                        segments.append((abs_time, "User", text))
+
+            # Transcribe agent audio
+            if recording_info.get("agent_wav") and recording_info["agent_wav"].exists():
+                agent_start = recording_info.get("agent_start", 0) or 0
+                result = model.transcribe(str(recording_info["agent_wav"]))
+                for seg in result.get("segments", []):
+                    abs_time = agent_start + seg["start"]
+                    text = seg["text"].strip()
+                    if text:
+                        segments.append((abs_time, "Agent", text))
+
+            # Sort by timestamp and merge consecutive same-speaker segments
+            segments.sort(key=lambda x: x[0])
+
+            # Merge consecutive same-speaker segments
+            merged = []
+            for seg in segments:
+                if merged and merged[-1][1] == seg[1]:
+                    # Same speaker - append text
+                    merged[-1] = (merged[-1][0], merged[-1][1], merged[-1][2] + " " + seg[2])
+                else:
+                    merged.append(seg)
+
+            # Write clean transcript
+            transcript_file = Path(__file__).parent.parent.parent / "transcripts" / f"{call_uuid}_final.txt"
+            with open(transcript_file, "w") as f:
+                for _, role, text in merged:
+                    f.write(f"{role}: {text}\n\n")
+
+            logger.info(f"Transcription complete for {call_uuid}: {len(merged)} turns")
+            return transcript_file
         except ImportError:
-            logger.warning("Whisper not installed")
-            return ""
+            logger.warning("Whisper not installed - skipping transcription")
+            return None
         except Exception as e:
             logger.error(f"Transcription error: {e}")
-            return ""
+            return None
 
 
     async def preload(self):
@@ -307,21 +358,31 @@ class PlivoGeminiSession:
         self.preloaded_audio = []
 
     async def _monitor_call_duration(self):
-        """Monitor call duration and trigger wrap-up at 8 minutes"""
+        """Monitor call duration with periodic heartbeat and trigger wrap-up at 8 minutes"""
         try:
-            # Wait until 7:30 (give 30 seconds for wrap-up)
-            wrap_up_time = self.max_call_duration - 30
-            await asyncio.sleep(wrap_up_time)
+            logger.info(f"Call {self.call_uuid[:8]} active - streaming audio")
+
+            # Heartbeat every 60 seconds until wrap-up time
+            wrap_up_time = self.max_call_duration - 30  # 7:30
+            elapsed = 0
+
+            while elapsed < wrap_up_time:
+                await asyncio.sleep(60)
+                elapsed += 60
+                if self.is_active and not self._closing_call:
+                    logger.info(f"Call {self.call_uuid[:8]} in progress: {elapsed}s")
+                else:
+                    return  # Call ended, stop monitoring
 
             if self.is_active and not self._closing_call:
-                logger.info(f"Call {self.call_uuid} reaching 8 min limit - triggering wrap-up")
+                logger.info(f"Call {self.call_uuid[:8]} reaching 8 min limit - triggering wrap-up")
                 self._closing_call = True
                 await self._send_wrap_up_message()
 
                 # Wait another 30 seconds then force end
                 await asyncio.sleep(30)
                 if self.is_active:
-                    logger.info(f"Call {self.call_uuid} reached max duration - ending call")
+                    logger.info(f"Call {self.call_uuid[:8]} reached max duration - ending call")
                     await self.stop()
         except asyncio.CancelledError:
             pass
@@ -421,20 +482,23 @@ class PlivoGeminiSession:
             logger.info(f"TOOL CALL: {tool_name} with args: {tool_args}")
             self._save_transcript("TOOL", f"{tool_name}: {tool_args}")
 
-            # Handle end_call tool specially
+            # Handle end_call tool - mark agent as said goodbye, wait for mutual farewell
             if tool_name == "end_call":
                 reason = tool_args.get("reason", "conversation ended")
-                logger.info(f"END CALL requested: {reason} - hanging up in 0.3s")
-                self._save_transcript("SYSTEM", f"Call ending: {reason}")
+                logger.info(f"END CALL tool called: {reason}")
+                self._save_transcript("SYSTEM", f"Agent requested call end: {reason}")
 
-                # Send success response first
+                # Mark agent as having said goodbye
+                self.agent_said_goodbye = True
+
+                # Send success response
                 try:
                     tool_response = {
                         "tool_response": {
                             "function_responses": [{
                                 "id": call_id,
                                 "name": tool_name,
-                                "response": {"success": True, "message": "Call will be ended"}
+                                "response": {"success": True, "message": "Waiting for mutual goodbye before ending"}
                             }]
                         }
                     }
@@ -442,9 +506,12 @@ class PlivoGeminiSession:
                 except:
                     pass
 
-                # Hang up the call after a short delay (let goodbye audio play)
-                # Reduced from 1.0s to 0.3s - audio is already queued in Plivo buffer
-                asyncio.create_task(self._hangup_call_delayed(0.3))
+                # Check if user already said goodbye
+                self._check_mutual_goodbye()
+
+                # Fallback: if user doesn't respond within 10 seconds, end anyway
+                if not self._closing_call:
+                    asyncio.create_task(self._fallback_hangup(10.0))
                 return
 
             # Execute the tool with context for templates - graceful error handling
@@ -478,6 +545,19 @@ class PlivoGeminiSession:
                 logger.info(f"Sent tool response for {tool_name}")
             except Exception as e:
                 logger.error(f"Error sending tool response: {e} - continuing conversation")
+
+    async def _fallback_hangup(self, timeout: float):
+        """Fallback hangup if user doesn't respond after agent says goodbye"""
+        try:
+            await asyncio.sleep(timeout)
+            if not self._closing_call and self.agent_said_goodbye:
+                logger.info(f"Fallback hangup - user didn't respond within {timeout}s after agent goodbye")
+                self._closing_call = True
+                await self._hangup_call_delayed(1.0)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Fallback hangup error: {e}")
 
     async def _hangup_call_delayed(self, delay: float):
         """Hang up the call after a short delay (audio is queued in Plivo buffer)"""
@@ -546,11 +626,11 @@ class PlivoGeminiSession:
                 # Debug: log all serverContent keys to find user transcription field
                 sc_keys = list(sc.keys())
                 if sc_keys != ['modelTurn'] and sc_keys != ['turnComplete']:
-                    logger.info(f"serverContent keys: {sc_keys}")
+                    logger.debug(f"serverContent keys: {sc_keys}")
 
                 # Check if turn is complete (greeting done)
                 if sc.get("turnComplete"):
-                    logger.info(f"Turn complete - preloaded {len(self.preloaded_audio)} audio chunks, plivo_ws={'connected' if self.plivo_ws else 'None'}")
+                    logger.debug(f"Turn complete - preloaded {len(self.preloaded_audio)} audio chunks")
                     self._preload_complete.set()
                     self.greeting_audio_complete = True
 
@@ -563,8 +643,15 @@ class PlivoGeminiSession:
                 if "inputTranscript" in sc:
                     user_text = sc["inputTranscript"]
                     if user_text and user_text.strip():
+                        self._last_user_speech_time = time.time()  # Track for latency
                         logger.info(f"USER said: {user_text}")
                         self._save_transcript("USER", user_text.strip())
+                        # Track if user said goodbye
+                        if self._is_goodbye_message(user_text):
+                            logger.info(f"USER said goodbye: {user_text[:50]}")
+                            self.user_said_goodbye = True
+                            # Check if both parties said goodbye
+                            self._check_mutual_goodbye()
 
                 if "modelTurn" in sc:
                     parts = sc.get("modelTurn", {}).get("parts", [])
@@ -574,7 +661,13 @@ class PlivoGeminiSession:
                             audio_bytes = base64.b64decode(audio)
                             # Record AI audio (24kHz)
                             self._record_audio("AI", audio_bytes, 24000)
-                            logger.info(f"AI AUDIO received: {len(audio_bytes)} bytes, greeting_complete={self.greeting_audio_complete}")
+
+                            # Latency check - only log if slow (> threshold)
+                            if self._last_user_speech_time:
+                                latency_ms = (time.time() - self._last_user_speech_time) * 1000
+                                if latency_ms > LATENCY_THRESHOLD_MS:
+                                    logger.warning(f"SLOW: AI response took {latency_ms:.0f}ms")
+                                self._last_user_speech_time = None  # Reset after first response
 
                             # During preload (no plivo_ws yet), always store audio
                             # This fixes race condition where turnComplete arrives before all audio
@@ -593,7 +686,7 @@ class PlivoGeminiSession:
                                     logger.error(f"Error sending audio to Plivo: {plivo_err} - continuing")
                         if p.get("text"):
                             ai_text = p["text"].strip()
-                            logger.info(f"AI TEXT: {ai_text[:100]}...")
+                            logger.debug(f"AI TEXT: {ai_text[:100]}...")
                             # Only save actual speech, not thinking/planning text
                             # Skip text that looks like internal reasoning (markdown, planning phrases)
                             is_thinking = (
@@ -607,12 +700,12 @@ class PlivoGeminiSession:
                             )
                             if ai_text and not is_thinking and len(ai_text) > 3:
                                 self._save_transcript("AGENT", ai_text)
-                                # AUTO-END: If agent says bye/goodbye, end call immediately
-                                # This is a backup - doesn't rely on Gemini calling end_call tool
+                                # Track if agent said goodbye (don't end immediately - wait for user)
                                 if not self._closing_call and self._is_goodbye_message(ai_text):
-                                    logger.info(f"AGENT said goodbye - auto-ending call: {ai_text[:50]}")
-                                    self._closing_call = True
-                                    asyncio.create_task(self._hangup_call_delayed(0.5))
+                                    logger.info(f"AGENT said goodbye: {ai_text[:50]}")
+                                    self.agent_said_goodbye = True
+                                    # Check if both parties said goodbye
+                                    self._check_mutual_goodbye()
         except Exception as e:
             logger.error(f"Error processing Google message: {e} - continuing session")
 
@@ -698,14 +791,14 @@ class PlivoGeminiSession:
         """Run all post-call processing (save, transcribe, webhook) in background thread"""
         def process_in_background():
             try:
-                # Step 1: Save recording
-                recording_file = self._save_recording()
+                # Step 1: Save separate user/agent recordings
+                recording_info = self._save_recording()
 
                 # Step 2: Transcribe with Whisper (only if enabled - RAM heavy)
-                if recording_file and config.enable_whisper:
-                    self._transcribe_recording_sync(recording_file, self.call_uuid)
-                elif recording_file:
-                    logger.info(f"Whisper disabled - recording saved without transcription: {recording_file}")
+                if recording_info and config.enable_whisper:
+                    self._transcribe_recording_sync(recording_info, self.call_uuid)
+                elif recording_info:
+                    logger.info(f"Whisper disabled - recordings saved: user={recording_info.get('user_wav')}, agent={recording_info.get('agent_wav')}")
 
                 # Step 3: Call webhook AFTER transcription is done
                 if self.webhook_url:
@@ -732,12 +825,16 @@ class PlivoGeminiSession:
         try:
             import httpx
 
-            # Read transcript file if it exists
+            # Read transcript file - prefer final (Whisper) transcript, fallback to real-time
             transcript = ""
             try:
-                transcript_file = Path(__file__).parent.parent.parent / "transcripts" / f"{self.call_uuid}.txt"
-                if transcript_file.exists():
-                    transcript = transcript_file.read_text()
+                transcript_dir = Path(__file__).parent.parent.parent / "transcripts"
+                final_transcript = transcript_dir / f"{self.call_uuid}_final.txt"
+                realtime_transcript = transcript_dir / f"{self.call_uuid}.txt"
+                if final_transcript.exists():
+                    transcript = final_transcript.read_text()
+                elif realtime_transcript.exists():
+                    transcript = realtime_transcript.read_text()
             except:
                 pass
 
