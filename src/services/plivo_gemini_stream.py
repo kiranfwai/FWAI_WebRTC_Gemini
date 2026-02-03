@@ -337,9 +337,9 @@ class PlivoGeminiSession:
             logger.info(f"PRELOADING Gemini session for call {self.call_uuid}")
             self.is_active = True
             self._session_task = asyncio.create_task(self._run_google_live_session())
-            # Wait for setup to complete (with timeout - 5s max)
+            # Wait for setup to complete (with timeout - 8s max for better greeting)
             try:
-                await asyncio.wait_for(self._preload_complete.wait(), timeout=5.0)
+                await asyncio.wait_for(self._preload_complete.wait(), timeout=8.0)
                 logger.info(f"PRELOAD COMPLETE for {self.call_uuid} - AI ready to speak! ({len(self.preloaded_audio)} audio chunks)")
             except asyncio.TimeoutError:
                 logger.warning(f"Preload timeout for {self.call_uuid} - continuing anyway with {len(self.preloaded_audio)} chunks")
@@ -467,7 +467,7 @@ class PlivoGeminiSession:
                         }
                     },
                     "thinking_config": {
-                        "thinking_budget": 0
+                        "thinking_budget": 2048  # Allow some thinking for better responses
                     }
                 },
                 "system_instruction": {"parts": [{"text": full_prompt}]},
