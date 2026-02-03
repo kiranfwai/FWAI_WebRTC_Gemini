@@ -486,20 +486,16 @@ class PlivoGeminiSession:
             "setup": {
                 "model": "models/gemini-2.5-flash-native-audio-preview-09-2025",
                 "generation_config": {
-                    "response_modalities": ["AUDIO", "TEXT"],  # Enable text for transcription
+                    "response_modalities": ["AUDIO"],  # Native audio model - audio only
                     "speech_config": {
                         "voice_config": {
                             "prebuilt_voice_config": {
                                 "voice_name": voice_name
                             }
                         }
-                    },
-                    "thinking_config": {
-                        "thinking_budget": 2048  # Allow some thinking for better responses
                     }
                 },
-                "input_audio_transcription": {},  # Enable user speech transcription
-                "output_audio_transcription": {},  # Enable AI speech transcription
+                # Note: Transcription via Whisper offline (native audio model doesn't support real-time transcription)
                 "system_instruction": {"parts": [{"text": full_prompt}]},
                 "tools": [{"function_declarations": TOOL_DECLARATIONS}]
             }
