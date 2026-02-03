@@ -279,7 +279,7 @@ class PlivoGeminiSession:
         try:
             import whisper
             logger.info(f"Starting Whisper transcription for {call_uuid}")
-            model = whisper.load_model("tiny")
+            model = whisper.load_model("medium")  # Better accuracy, needs 5GB RAM
 
             segments = []  # List of (absolute_time, role, text)
 
@@ -465,6 +465,9 @@ class PlivoGeminiSession:
                                 "voice_name": voice_name
                             }
                         }
+                    },
+                    "thinking_config": {
+                        "thinking_budget": 0
                     }
                 },
                 "system_instruction": {"parts": [{"text": full_prompt}]},
@@ -472,7 +475,7 @@ class PlivoGeminiSession:
             }
         }
         await self.goog_live_ws.send(json.dumps(msg))
-        logger.info(f"Sent session setup with voice: {voice_name}")
+        logger.info(f"Sent session setup with voice: {voice_name}, thinking disabled")
 
     async def _send_initial_greeting(self):
         """Send initial trigger to make AI greet immediately"""

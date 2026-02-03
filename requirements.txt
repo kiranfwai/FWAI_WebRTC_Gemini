@@ -50,11 +50,9 @@ pydantic>=2.0.0
 loguru>=0.7.2
 
 # =============================================================================
-# Transcription (Optional - uses more RAM)
+# Transcription (Whisper for accurate offline transcription)
 # =============================================================================
-# Uncomment below if you need local Whisper transcription
-# Note: Requires 2GB+ RAM, skip on 1GB servers
-# openai-whisper
+openai-whisper
 
 # =============================================================================
 # For Windows Development (optional)
