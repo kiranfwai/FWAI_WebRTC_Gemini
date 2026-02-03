@@ -113,6 +113,10 @@ class PlivoGeminiSession:
         # Latency tracking - only logs if > threshold
         self._last_user_speech_time = None
 
+        # Audio buffer for reconnection (store audio if Google WS drops briefly)
+        self._reconnect_audio_buffer = []
+        self._max_reconnect_buffer = 50  # Max chunks to buffer (~1 second)
+
     def _is_goodbye_message(self, text: str) -> bool:
         """Detect if agent is saying goodbye - triggers auto call end"""
         text_lower = text.lower()
@@ -428,20 +432,44 @@ class PlivoGeminiSession:
 
     async def _run_google_live_session(self):
         url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={config.google_api_key}"
-        try:
-            async with websockets.connect(url) as ws:
-                self.goog_live_ws = ws
-                logger.info("Connected to Google Live API")
-                await self._send_session_setup()
-                async for message in ws:
-                    if not self.is_active:
-                        break
-                    await self._receive_from_google(message)
-        except Exception as e:
-            logger.error(f"Google Live error: {e}")
-        finally:
-            self.goog_live_ws = None
-            logger.info("Google Live session ended")
+        reconnect_attempts = 0
+        max_reconnects = 3
+
+        while self.is_active and reconnect_attempts < max_reconnects:
+            try:
+                async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
+                    self.goog_live_ws = ws
+                    reconnect_attempts = 0  # Reset on successful connect
+                    logger.info("Connected to Google Live API")
+                    await self._send_session_setup()
+                    # Flush any buffered audio from reconnection
+                    if self._reconnect_audio_buffer:
+                        logger.info(f"Flushing {len(self._reconnect_audio_buffer)} buffered audio chunks after reconnect")
+                        for buffered_audio in self._reconnect_audio_buffer:
+                            await self.handle_plivo_audio(buffered_audio)
+                        self._reconnect_audio_buffer = []
+                    async for message in ws:
+                        if not self.is_active:
+                            break
+                        await self._receive_from_google(message)
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.warning(f"Google WS connection closed: code={e.code}, reason={e.reason}")
+                if self.is_active and not self._closing_call:
+                    reconnect_attempts += 1
+                    logger.info(f"Attempting reconnect {reconnect_attempts}/{max_reconnects}...")
+                    await asyncio.sleep(0.5)  # Brief pause before reconnect
+                    continue
+            except Exception as e:
+                logger.error(f"Google Live error: {e}")
+                if self.is_active and not self._closing_call:
+                    reconnect_attempts += 1
+                    logger.info(f"Attempting reconnect {reconnect_attempts}/{max_reconnects} after error...")
+                    await asyncio.sleep(0.5)
+                    continue
+            break  # Normal exit
+
+        self.goog_live_ws = None
+        logger.info("Google Live session ended")
 
     async def _send_session_setup(self):
         # Concise accent instruction (shorter = faster responses)
@@ -741,7 +769,11 @@ class PlivoGeminiSession:
                 logger.debug(f"Skipping audio: active={self.is_active}, streaming={self.start_streaming}")
                 return
             if not self.goog_live_ws:
-                logger.warning("Google WS not connected, skipping audio")
+                # Buffer audio during reconnection (don't lose user speech)
+                if len(self._reconnect_audio_buffer) < self._max_reconnect_buffer:
+                    self._reconnect_audio_buffer.append(audio_b64)
+                    if len(self._reconnect_audio_buffer) == 1:
+                        logger.warning("Google WS disconnected - buffering audio for reconnection")
                 return
             chunk = base64.b64decode(audio_b64)
             # Record user audio (16kHz)
