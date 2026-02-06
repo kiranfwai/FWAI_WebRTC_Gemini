@@ -124,8 +124,9 @@ class PlivoGeminiSession:
         self._reconnect_audio_buffer = []
         self._max_reconnect_buffer = 150  # Increased buffer (~3 seconds) for better reconnection
 
-        # Conversation history for context restoration on reconnect
+        # Conversation history for context restoration on reconnect (keep small to reduce latency)
         self._conversation_history = []  # List of {"role": "user"/"model", "text": "..."}
+        self._max_history_size = 10  # Keep only last 10 messages to prevent latency buildup
         self._is_first_connection = True  # Track if this is first connect or reconnect
 
         # Google session refresh timer (10-min limit, refresh at 9 min)
@@ -409,7 +410,8 @@ class PlivoGeminiSession:
                 await asyncio.sleep(60)
                 elapsed += 60
                 if self.is_active and not self._closing_call:
-                    logger.info(f"Call {self.call_uuid[:8]} in progress: {elapsed}s")
+                    # Log buffer stats for debugging latency
+                    logger.info(f"Call {self.call_uuid[:8]} in progress: {elapsed}s | history:{len(self._conversation_history)} inbuf:{len(self.inbuffer)} reconnect_buf:{len(self._reconnect_audio_buffer)}")
                 else:
                     return  # Call ended, stop monitoring
 
@@ -540,16 +542,16 @@ class PlivoGeminiSession:
         # Combine: accent first, then main prompt
         full_prompt = accent_instruction + self.prompt
 
-        # On reconnect, add context about ongoing conversation
+        # On reconnect, add context about ongoing conversation (keep minimal to reduce latency)
         if not self._is_first_connection and self._conversation_history:
             # Build conversation summary for context restoration
-            history_text = "\n\n[IMPORTANT: This is a RECONNECTION. The call is already in progress. Here's the conversation so far - DO NOT greet again, just continue naturally:]\n"
-            for msg_item in self._conversation_history[-30:]:  # Last 30 messages for better context
-                role = "Customer" if msg_item["role"] == "user" else "You (Vishnu)"
+            history_text = "\n\n[RECONNECTION - call in progress. Recent conversation:]\n"
+            for msg_item in self._conversation_history[-self._max_history_size:]:
+                role = "Customer" if msg_item["role"] == "user" else "You"
                 history_text += f"{role}: {msg_item['text']}\n"
-            history_text += "\n[Continue the conversation naturally from where it left off. Do NOT say hello or introduce yourself again.]"
+            history_text += "[Continue naturally - do NOT greet again]"
             full_prompt = full_prompt + history_text
-            logger.info(f"Reconnecting with {len(self._conversation_history)} messages of context")
+            logger.info(f"Reconnecting with {min(len(self._conversation_history), self._max_history_size)} messages of context")
 
         # Detect voice based on prompt content (female -> Kore, default -> Puck)
         voice_name = detect_voice_from_prompt(self.prompt)
@@ -798,8 +800,10 @@ class PlivoGeminiSession:
                         self._last_user_speech_time = time.time()  # Track for latency
                         logger.info(f"USER said: {user_text}")
                         self._save_transcript("USER", user_text.strip())
-                        # Store in conversation history for reconnect context
+                        # Store in conversation history for reconnect context (limit size to prevent latency)
                         self._conversation_history.append({"role": "user", "text": user_text.strip()})
+                        if len(self._conversation_history) > self._max_history_size:
+                            self._conversation_history = self._conversation_history[-self._max_history_size:]
                         # Track if user said goodbye
                         if self._is_goodbye_message(user_text):
                             logger.info(f"USER said goodbye: {user_text[:50]}")
@@ -856,8 +860,10 @@ class PlivoGeminiSession:
                             )
                             if ai_text and not is_thinking and len(ai_text) > 3:
                                 self._save_transcript("AGENT", ai_text)
-                                # Store in conversation history for reconnect context
+                                # Store in conversation history for reconnect context (limit size)
                                 self._conversation_history.append({"role": "model", "text": ai_text})
+                                if len(self._conversation_history) > self._max_history_size:
+                                    self._conversation_history = self._conversation_history[-self._max_history_size:]
                                 # Track if agent said goodbye (don't end immediately - wait for user)
                                 if not self._closing_call and self._is_goodbye_message(ai_text):
                                     logger.info(f"AGENT said goodbye: {ai_text[:50]}")
