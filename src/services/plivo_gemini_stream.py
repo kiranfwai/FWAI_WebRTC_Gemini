@@ -119,6 +119,8 @@ class PlivoGeminiSession:
         self._last_ai_audio_time = None  # Track when AI last sent audio
         self._current_turn_audio_chunks = 0  # Track audio chunks in current turn
         self._empty_turn_nudge_count = 0  # Track consecutive empty turns
+        self._turn_start_time = None  # Track when current turn started (for latency logging)
+        self._turn_count = 0  # Count turns for latency tracking
 
         # Audio buffer for reconnection (store audio if Google WS drops briefly)
         self._reconnect_audio_buffer = []
@@ -803,15 +805,21 @@ class PlivoGeminiSession:
 
                 # Check if turn is complete (greeting done)
                 if sc.get("turnComplete"):
-                    logger.debug(f"Turn complete - preloaded {len(self.preloaded_audio)} audio chunks, turn audio: {self._current_turn_audio_chunks}")
                     self._preload_complete.set()
                     self.greeting_audio_complete = True
+                    self._turn_count += 1
+
+                    # Log turn latency at INFO level (always visible)
+                    if self._turn_start_time and self._current_turn_audio_chunks > 0:
+                        turn_duration_ms = (time.time() - self._turn_start_time) * 1000
+                        logger.info(f"TURN #{self._turn_count}: {self._current_turn_audio_chunks} chunks in {turn_duration_ms:.0f}ms")
+                        self._turn_start_time = None
 
                     # Detect empty turn (AI didn't generate audio) - nudge to respond
                     if self._current_turn_audio_chunks == 0 and self.greeting_audio_complete and not self._closing_call:
                         self._empty_turn_nudge_count += 1
                         if self._empty_turn_nudge_count <= 3:  # Max 3 nudges to prevent loop
-                            logger.warning(f"EMPTY TURN detected (no audio generated) - nudging AI (attempt {self._empty_turn_nudge_count})")
+                            logger.warning(f"EMPTY TURN #{self._turn_count} - nudging AI (attempt {self._empty_turn_nudge_count})")
                             asyncio.create_task(self._send_silence_nudge())
                     else:
                         self._empty_turn_nudge_count = 0  # Reset on successful audio
@@ -850,6 +858,9 @@ class PlivoGeminiSession:
                             audio_bytes = base64.b64decode(audio)
                             # Track audio chunks for empty turn detection
                             self._current_turn_audio_chunks += 1
+                            # Track turn start time (first audio chunk of this turn)
+                            if self._current_turn_audio_chunks == 1:
+                                self._turn_start_time = time.time()
                             # Record AI audio (24kHz)
                             self._record_audio("AI", audio_bytes, 24000)
 
