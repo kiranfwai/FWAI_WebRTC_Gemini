@@ -113,6 +113,11 @@ class PlivoGeminiSession:
         # Latency tracking - only logs if > threshold
         self._last_user_speech_time = None
 
+        # Silence monitoring - 3 second SLA
+        self._silence_monitor_task = None
+        self._silence_sla_seconds = 3.0  # Must respond within 3 seconds
+        self._last_ai_audio_time = None  # Track when AI last sent audio
+
         # Audio buffer for reconnection (store audio if Google WS drops briefly)
         self._reconnect_audio_buffer = []
         self._max_reconnect_buffer = 150  # Increased buffer (~3 seconds) for better reconnection
@@ -375,6 +380,8 @@ class PlivoGeminiSession:
             logger.warning(f"PRELOAD MISS: No preloaded audio - AI greeting will have latency")
         # Start call duration timer
         self._timeout_task = asyncio.create_task(self._monitor_call_duration())
+        # Start silence monitor (3 second SLA)
+        self._silence_monitor_task = asyncio.create_task(self._monitor_silence())
 
     async def _send_preloaded_audio(self):
         """Send preloaded audio to Plivo"""
@@ -438,6 +445,49 @@ class PlivoGeminiSession:
             self._save_transcript("SYSTEM", "Call time limit - wrapping up")
         except Exception as e:
             logger.error(f"Error sending wrap-up message: {e}")
+
+    async def _monitor_silence(self):
+        """Monitor for silence - nudge AI if no response within 3 second SLA"""
+        try:
+            while self.is_active and not self._closing_call:
+                await asyncio.sleep(1.0)  # Check every second
+
+                # Only check if user has spoken and we're waiting for response
+                if self._last_user_speech_time is None:
+                    continue
+
+                silence_duration = time.time() - self._last_user_speech_time
+
+                # If silence exceeds SLA, nudge the AI to respond
+                if silence_duration >= self._silence_sla_seconds:
+                    logger.warning(f"SILENCE SLA BREACH: {silence_duration:.1f}s without AI response - nudging model")
+                    await self._send_silence_nudge()
+                    # Reset timer to avoid repeated nudges
+                    self._last_user_speech_time = None
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Error in silence monitor: {e}")
+
+    async def _send_silence_nudge(self):
+        """Send a nudge to AI to respond when silence detected"""
+        if not self.goog_live_ws or self._closing_call:
+            return
+        try:
+            msg = {
+                "client_content": {
+                    "turns": [{
+                        "role": "user",
+                        "parts": [{"text": "[Continue the conversation - respond to what the customer just said]"}]
+                    }],
+                    "turn_complete": True
+                }
+            }
+            await self.goog_live_ws.send(json.dumps(msg))
+            logger.info("Sent silence nudge to AI")
+        except Exception as e:
+            logger.error(f"Error sending silence nudge: {e}")
 
     async def _run_google_live_session(self):
         url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={config.google_api_key}"
@@ -855,6 +905,10 @@ class PlivoGeminiSession:
         # Cancel timeout task
         if self._timeout_task:
             self._timeout_task.cancel()
+
+        # Cancel silence monitor
+        if self._silence_monitor_task:
+            self._silence_monitor_task.cancel()
 
         # Calculate call duration
         duration = 0
