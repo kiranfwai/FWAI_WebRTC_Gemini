@@ -324,23 +324,33 @@ class PlivoGeminiSession:
                     if text:
                         segments.append((abs_time, "Agent", text))
 
-            # Sort by timestamp and merge consecutive same-speaker segments
+            # Sort by timestamp - don't merge, keep each segment separate for accuracy
             segments.sort(key=lambda x: x[0])
 
-            # Merge consecutive same-speaker segments
+            # Only merge if segments are very close together (< 0.5 seconds apart) and same speaker
             merged = []
             for seg in segments:
                 if merged and merged[-1][1] == seg[1]:
-                    # Same speaker - append text
-                    merged[-1] = (merged[-1][0], merged[-1][1], merged[-1][2] + " " + seg[2])
+                    # Same speaker - only merge if within 0.5 seconds
+                    time_gap = seg[0] - merged[-1][0]
+                    if time_gap < 0.5:
+                        merged[-1] = (merged[-1][0], merged[-1][1], merged[-1][2] + " " + seg[2])
+                    else:
+                        # Too much gap - keep separate
+                        merged.append(seg)
                 else:
                     merged.append(seg)
 
-            # Write clean transcript
+            # Write clean transcript with timestamps
             transcript_file = Path(__file__).parent.parent.parent / "transcripts" / f"{call_uuid}_final.txt"
             with open(transcript_file, "w") as f:
-                for _, role, text in merged:
-                    f.write(f"{role}: {text}\n\n")
+                # Get call start time for relative timestamps
+                call_start = min(s[0] for s in merged) if merged else 0
+                for abs_time, role, text in merged:
+                    rel_time = abs_time - call_start
+                    mins = int(rel_time // 60)
+                    secs = int(rel_time % 60)
+                    f.write(f"[{mins:02d}:{secs:02d}] {role}: {text}\n\n")
 
             logger.info(f"Transcription complete for {call_uuid}: {len(merged)} turns")
             return transcript_file
