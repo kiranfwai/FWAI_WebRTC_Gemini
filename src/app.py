@@ -312,6 +312,46 @@ async def api_terminate_call(call_id: str):
         raise HTTPException(status_code=404, detail=result.get("error"))
 
 
+@app.get("/calls/{call_id}/transcript")
+async def get_call_transcript(call_id: str):
+    """
+    Get transcript for a call by call_uuid
+
+    Returns the Whisper transcript (_final.txt) if available,
+    otherwise returns the real-time transcript (.txt)
+    """
+    from pathlib import Path
+
+    transcript_dir = Path(__file__).parent.parent / "transcripts"
+
+    # Try final (Whisper) transcript first
+    final_transcript = transcript_dir / f"{call_id}_final.txt"
+    realtime_transcript = transcript_dir / f"{call_id}.txt"
+
+    transcript = None
+    transcript_type = None
+
+    if final_transcript.exists():
+        transcript = final_transcript.read_text()
+        transcript_type = "whisper"
+    elif realtime_transcript.exists():
+        transcript = realtime_transcript.read_text()
+        transcript_type = "realtime"
+
+    if transcript:
+        return JSONResponse(content={
+            "success": True,
+            "call_uuid": call_id,
+            "transcript_type": transcript_type,
+            "transcript": transcript
+        })
+    else:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Transcript not found for call {call_id}. Call may still be in progress or transcripts may be disabled."
+        )
+
+
 # ============================================================================
 # Main Entry Point
 # ============================================================================
