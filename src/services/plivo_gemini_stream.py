@@ -492,7 +492,7 @@ class PlivoGeminiSession:
         if not self._is_first_connection and self._conversation_history:
             # Build conversation summary for context restoration
             history_text = "\n\n[IMPORTANT: This is a RECONNECTION. The call is already in progress. Here's the conversation so far - DO NOT greet again, just continue naturally:]\n"
-            for msg_item in self._conversation_history[-10:]:  # Last 10 messages
+            for msg_item in self._conversation_history[-30:]:  # Last 30 messages for better context
                 role = "Customer" if msg_item["role"] == "user" else "You (Vishnu)"
                 history_text += f"{role}: {msg_item['text']}\n"
             history_text += "\n[Continue the conversation naturally from where it left off. Do NOT say hello or introduce yourself again.]"
