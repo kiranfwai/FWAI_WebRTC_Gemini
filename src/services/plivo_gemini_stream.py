@@ -273,7 +273,7 @@ class PlivoGeminiSession:
         return struct.pack(f'<{len(samples_16k)}h', *samples_16k)
 
     def _save_recording(self):
-        """Save mixed WAV file for Gemini transcription with native diarization"""
+        """Save mixed MP3 file for Gemini transcription (10x smaller than WAV)"""
         logger.info(f"Saving recording: enabled={self.recording_enabled}, chunks={len(self.audio_chunks)}")
         if not self.recording_enabled or not self.audio_chunks:
             logger.warning(f"Skipping recording: enabled={self.recording_enabled}, chunks={len(self.audio_chunks)}")
@@ -305,18 +305,31 @@ class PlivoGeminiSession:
                 mixed_audio.extend(audio_bytes)
                 current_time = timestamp + len(audio_bytes) / (SAMPLE_RATE * BYTES_PER_SAMPLE)
 
-            # Save mixed WAV
-            mixed_wav = RECORDINGS_DIR / f"{self.call_uuid}_mixed.wav"
-            with wave.open(str(mixed_wav), 'wb') as wav:
-                wav.setnchannels(1)
-                wav.setsampwidth(2)
-                wav.setframerate(16000)
-                wav.writeframes(bytes(mixed_audio))
-
-            logger.info(f"Mixed recording saved: {len(mixed_audio)} bytes, {len(sorted_chunks)} chunks")
+            # Save as MP3 using pydub (10x smaller than WAV)
+            mixed_mp3 = RECORDINGS_DIR / f"{self.call_uuid}_mixed.mp3"
+            try:
+                from pydub import AudioSegment
+                audio_segment = AudioSegment(
+                    data=bytes(mixed_audio),
+                    sample_width=2,
+                    frame_rate=16000,
+                    channels=1
+                )
+                audio_segment.export(str(mixed_mp3), format="mp3", bitrate="64k")
+                logger.info(f"MP3 recording saved: {mixed_mp3.stat().st_size} bytes, {len(sorted_chunks)} chunks")
+            except ImportError:
+                # Fallback to WAV if pydub not installed
+                logger.warning("pydub not installed, falling back to WAV")
+                mixed_mp3 = RECORDINGS_DIR / f"{self.call_uuid}_mixed.wav"
+                with wave.open(str(mixed_mp3), 'wb') as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(16000)
+                    wav.writeframes(bytes(mixed_audio))
+                logger.info(f"WAV recording saved: {len(mixed_audio)} bytes")
 
             return {
-                "mixed_wav": mixed_wav,
+                "mixed_wav": mixed_mp3,  # Key name kept for compatibility
                 "call_start": call_start
             }
         except Exception as e:
