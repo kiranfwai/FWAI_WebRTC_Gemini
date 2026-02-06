@@ -864,7 +864,7 @@ class PlivoGeminiSession:
                             # This fixes race condition where turnComplete arrives before all audio
                             if not self.plivo_ws:
                                 self.preloaded_audio.append(audio)
-                                logger.debug(f"Stored preload audio chunk #{len(self.preloaded_audio)}")
+                                # Removed per-chunk logging
                             elif self.plivo_ws:
                                 # After greeting done, send directly to Plivo
                                 try:
@@ -872,7 +872,7 @@ class PlivoGeminiSession:
                                         "event": "playAudio",
                                         "media": {"contentType": "audio/x-l16", "sampleRate": 24000, "payload": audio}
                                     }))
-                                    logger.debug(f"Sent AI audio to Plivo: {len(audio_bytes)} bytes")
+                                    # Removed per-chunk logging to reduce I/O overhead
                                 except Exception as plivo_err:
                                     logger.error(f"Error sending audio to Plivo: {plivo_err} - continuing")
                         if p.get("text"):
@@ -908,8 +908,7 @@ class PlivoGeminiSession:
         """Handle incoming audio from Plivo - graceful error handling"""
         try:
             if not self.is_active or not self.start_streaming:
-                logger.debug(f"Skipping audio: active={self.is_active}, streaming={self.start_streaming}")
-                return
+                return  # Skip silently to reduce log noise
             if not self.goog_live_ws:
                 # Buffer audio during reconnection (don't lose user speech)
                 if len(self._reconnect_audio_buffer) < self._max_reconnect_buffer:

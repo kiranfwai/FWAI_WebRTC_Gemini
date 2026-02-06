@@ -58,7 +58,7 @@ logger.add(
     Path(__file__).parent.parent / "logs" / "fwai_voice.log",
     rotation="10 MB",
     retention="7 days",
-    level="DEBUG"
+    level=config.log_level  # Use config (default INFO, set LOG_LEVEL in .env)
 )
 
 
