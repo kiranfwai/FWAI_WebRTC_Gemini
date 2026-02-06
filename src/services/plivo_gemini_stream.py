@@ -578,10 +578,10 @@ class PlivoGeminiSession:
                             }
                         }
                     },
-                    # Thinking disabled - was causing AI to output **Planning** text instead of natural speech
-                    # "thinking_config": {
-                    #     "thinking_budget": 512
-                    # }
+                    # Minimal thinking for better instruction following (adds ~50-100ms)
+                    "thinking_config": {
+                        "thinking_budget": 128
+                    }
                 },
                 # Note: Transcription via Whisper offline (native audio model doesn't support real-time transcription)
                 "system_instruction": {"parts": [{"text": full_prompt}]},
