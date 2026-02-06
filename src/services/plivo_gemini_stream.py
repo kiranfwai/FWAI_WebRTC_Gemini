@@ -179,12 +179,12 @@ class PlivoGeminiSession:
         """End call when agent says goodbye (don't wait too long for user)"""
         if self.agent_said_goodbye and not self._closing_call:
             if self.user_said_goodbye:
-                logger.info(f"MUTUAL GOODBYE - ending call immediately")
+                logger.info(f"[{self.call_uuid[:8]}] STEP:MUTUAL_GOODBYE | Both parties said goodbye - ending call")
                 self._closing_call = True
                 asyncio.create_task(self._hangup_call_delayed(0.5))  # Quick end
             else:
                 # Agent said goodbye but user hasn't - start short timeout
-                logger.info(f"AGENT GOODBYE - waiting 3s for user response")
+                logger.info(f"[{self.call_uuid[:8]}] STEP:AGENT_GOODBYE | Agent said goodbye - waiting 3s for user")
                 asyncio.create_task(self._quick_goodbye_timeout(3.0))
 
     async def _quick_goodbye_timeout(self, timeout: float):
@@ -192,7 +192,7 @@ class PlivoGeminiSession:
         try:
             await asyncio.sleep(timeout)
             if not self._closing_call and self.agent_said_goodbye:
-                logger.info(f"Quick goodbye timeout - ending call")
+                logger.info(f"[{self.call_uuid[:8]}] STEP:GOODBYE_TIMEOUT | No user response after {timeout}s - ending call")
                 self._closing_call = True
                 await self._hangup_call_delayed(0.5)
         except asyncio.CancelledError:
@@ -392,15 +392,15 @@ class PlivoGeminiSession:
     async def preload(self):
         """Preload the Gemini session while phone is ringing"""
         try:
-            logger.info(f"PRELOADING Gemini session for call {self.call_uuid}")
+            logger.info(f"[{self.call_uuid[:8]}] STEP:PRELOAD_START | Preloading Gemini session")
             self.is_active = True
             self._session_task = asyncio.create_task(self._run_google_live_session())
             # Wait for setup to complete (with timeout - 8s max for better greeting)
             try:
                 await asyncio.wait_for(self._preload_complete.wait(), timeout=8.0)
-                logger.info(f"PRELOAD COMPLETE for {self.call_uuid} - AI ready to speak! ({len(self.preloaded_audio)} audio chunks)")
+                logger.info(f"[{self.call_uuid[:8]}] STEP:PRELOAD_COMPLETE | AI ready! ({len(self.preloaded_audio)} audio chunks)")
             except asyncio.TimeoutError:
-                logger.warning(f"Preload timeout for {self.call_uuid} - continuing anyway with {len(self.preloaded_audio)} chunks")
+                logger.warning(f"[{self.call_uuid[:8]}] STEP:PRELOAD_TIMEOUT | Continuing with {len(self.preloaded_audio)} chunks")
             return True
         except Exception as e:
             logger.error(f"Failed to preload session: {e}")
@@ -411,13 +411,13 @@ class PlivoGeminiSession:
         self.plivo_ws = plivo_ws
         self.call_start_time = datetime.now()
         preload_count = len(self.preloaded_audio)
-        logger.info(f"Plivo WS attached for {self.call_uuid} - PRELOAD: {preload_count} audio chunks ready")
+        logger.info(f"[{self.call_uuid[:8]}] STEP:CALL_ANSWERED | Plivo WS attached - {preload_count} chunks preloaded")
         # Send any preloaded audio immediately
         if self.preloaded_audio:
-            logger.info(f"PRELOAD SUCCESS: Sending {preload_count} chunks immediately (no wait for AI)")
+            logger.info(f"[{self.call_uuid[:8]}] STEP:PRELOAD_SUCCESS | Sending {preload_count} chunks immediately")
             asyncio.create_task(self._send_preloaded_audio())
         else:
-            logger.warning(f"PRELOAD MISS: No preloaded audio - AI greeting will have latency")
+            logger.warning(f"[{self.call_uuid[:8]}] STEP:PRELOAD_MISS | No audio preloaded - greeting will have latency")
         # Start call duration timer
         self._timeout_task = asyncio.create_task(self._monitor_call_duration())
         # Start silence monitor (3 second SLA)
@@ -425,7 +425,7 @@ class PlivoGeminiSession:
 
     async def _send_preloaded_audio(self):
         """Send preloaded audio to Plivo"""
-        logger.info(f"Sending {len(self.preloaded_audio)} preloaded audio chunks")
+        logger.info(f"[{self.call_uuid[:8]}] STEP:SENDING_PRELOAD | Sending {len(self.preloaded_audio)} preloaded chunks")
         for audio in self.preloaded_audio:
             if self.plivo_ws:
                 await self.plivo_ws.send_text(json.dumps({
@@ -437,7 +437,7 @@ class PlivoGeminiSession:
     async def _monitor_call_duration(self):
         """Monitor call duration with periodic heartbeat and trigger wrap-up at 8 minutes"""
         try:
-            logger.info(f"Call {self.call_uuid[:8]} active - streaming audio")
+            logger.info(f"[{self.call_uuid[:8]}] STEP:CALL_ACTIVE | Streaming audio started")
 
             # Heartbeat every 60 seconds until wrap-up time
             wrap_up_time = self.max_call_duration - 30  # 7:30
@@ -501,7 +501,7 @@ class PlivoGeminiSession:
 
                 # If silence exceeds SLA, nudge the AI to respond
                 if silence_duration >= self._silence_sla_seconds:
-                    logger.warning(f"SILENCE SLA BREACH: {silence_duration:.1f}s without AI response - nudging model")
+                    logger.warning(f"[{self.call_uuid[:8]}] STEP:SILENCE_SLA | {silence_duration:.1f}s without AI response - nudging model")
                     await self._send_silence_nudge()
                     # Reset timer to avoid repeated nudges
                     self._last_user_speech_time = None
@@ -526,7 +526,7 @@ class PlivoGeminiSession:
                 }
             }
             await self.goog_live_ws.send(json.dumps(msg))
-            logger.info("Sent silence nudge to AI")
+            logger.info(f"[{self.call_uuid[:8]}] STEP:SILENCE_NUDGE | Sent nudge to AI")
         except Exception as e:
             logger.error(f"Error sending silence nudge: {e}")
 
@@ -540,11 +540,11 @@ class PlivoGeminiSession:
                 async with websockets.connect(url, ping_interval=30, ping_timeout=20, close_timeout=5) as ws:
                     self.goog_live_ws = ws
                     reconnect_attempts = 0  # Reset on successful connect
-                    logger.info("Connected to Google Live API")
+                    logger.info(f"[{self.call_uuid[:8]}] STEP:GEMINI_CONNECTED | Connected to Google Live API")
                     await self._send_session_setup()
                     # Flush any buffered audio from reconnection
                     if self._reconnect_audio_buffer:
-                        logger.info(f"Flushing {len(self._reconnect_audio_buffer)} buffered audio chunks after reconnect")
+                        logger.info(f"[{self.call_uuid[:8]}] STEP:FLUSH_BUFFER | Flushing {len(self._reconnect_audio_buffer)} buffered audio chunks")
                         for buffered_audio in self._reconnect_audio_buffer:
                             await self.handle_plivo_audio(buffered_audio)
                         self._reconnect_audio_buffer = []
@@ -553,23 +553,23 @@ class PlivoGeminiSession:
                             break
                         await self._receive_from_google(message)
             except websockets.exceptions.ConnectionClosed as e:
-                logger.warning(f"Google WS connection closed: code={e.code}, reason={e.reason}")
+                logger.warning(f"[{self.call_uuid[:8]}] STEP:GEMINI_CLOSED | code={e.code}, reason={e.reason}")
                 if self.is_active and not self._closing_call:
                     reconnect_attempts += 1
-                    logger.info(f"Attempting reconnect {reconnect_attempts}/{max_reconnects}...")
+                    logger.info(f"[{self.call_uuid[:8]}] STEP:RECONNECTING | Attempt {reconnect_attempts}/{max_reconnects}")
                     await asyncio.sleep(0.2)  # Faster reconnect (was 0.5)
                     continue
             except Exception as e:
                 logger.error(f"Google Live error: {e}")
                 if self.is_active and not self._closing_call:
                     reconnect_attempts += 1
-                    logger.info(f"Attempting reconnect {reconnect_attempts}/{max_reconnects} after error...")
+                    logger.info(f"[{self.call_uuid[:8]}] STEP:RECONNECTING | Attempt {reconnect_attempts}/{max_reconnects} after error")
                     await asyncio.sleep(0.2)  # Faster reconnect (was 0.5)
                     continue
             break  # Normal exit
 
         self.goog_live_ws = None
-        logger.info("Google Live session ended")
+        logger.info(f"[{self.call_uuid[:8]}] STEP:SESSION_ENDED | Google Live session ended")
 
     async def _send_session_setup(self):
         # Concise accent instruction (shorter = faster responses)
@@ -648,13 +648,13 @@ class PlivoGeminiSession:
             tool_args = fc.get("args", {})
             call_id = fc.get("id")
 
-            logger.info(f"TOOL CALL: {tool_name} with args: {tool_args}")
+            logger.info(f"[{self.call_uuid[:8]}] STEP:TOOL_CALL | {tool_name} with args: {tool_args}")
             self._save_transcript("TOOL", f"{tool_name}: {tool_args}")
 
             # Handle end_call tool - mark agent as said goodbye, wait for mutual farewell
             if tool_name == "end_call":
                 reason = tool_args.get("reason", "conversation ended")
-                logger.info(f"END CALL tool called: {reason}")
+                logger.info(f"[{self.call_uuid[:8]}] STEP:END_CALL_TOOL | reason: {reason}")
                 self._save_transcript("SYSTEM", f"Agent requested call end: {reason}")
 
                 # Mark agent as having said goodbye
@@ -778,7 +778,7 @@ class PlivoGeminiSession:
                 logger.debug(f"Gemini response keys: {resp_keys}")
 
             if "setupComplete" in resp:
-                logger.info("Google Live setup complete - AI Ready")
+                logger.info(f"[{self.call_uuid[:8]}] STEP:SETUP_COMPLETE | Google Live setup complete - AI Ready")
                 self.start_streaming = True
                 self.setup_complete = True
                 self._google_session_start = time.time()  # Track session start for 10-min limit
@@ -788,7 +788,7 @@ class PlivoGeminiSession:
 
             # Handle GoAway message - 9-minute warning before 10-minute session limit
             if "goAway" in resp:
-                logger.warning("Received GoAway from Google - session will end soon (10-min limit). Triggering proactive reconnect...")
+                logger.warning(f"[{self.call_uuid[:8]}] STEP:GOAWAY | Received GoAway - 10-min limit, reconnecting...")
                 self._save_transcript("SYSTEM", "Session refresh triggered (10-min limit)")
                 # Don't wait for disconnect - proactively close and reconnect
                 if self.goog_live_ws:
@@ -817,14 +817,14 @@ class PlivoGeminiSession:
                     # Log turn latency at INFO level (always visible)
                     if self._turn_start_time and self._current_turn_audio_chunks > 0:
                         turn_duration_ms = (time.time() - self._turn_start_time) * 1000
-                        logger.info(f"TURN #{self._turn_count}: {self._current_turn_audio_chunks} chunks in {turn_duration_ms:.0f}ms")
+                        logger.info(f"[{self.call_uuid[:8]}] STEP:TURN_COMPLETE | Turn #{self._turn_count}: {self._current_turn_audio_chunks} chunks in {turn_duration_ms:.0f}ms")
                         self._turn_start_time = None
 
                     # Detect empty turn (AI didn't generate audio) - nudge to respond
                     if self._current_turn_audio_chunks == 0 and self.greeting_audio_complete and not self._closing_call:
                         self._empty_turn_nudge_count += 1
                         if self._empty_turn_nudge_count <= 3:  # Max 3 nudges to prevent loop
-                            logger.warning(f"EMPTY TURN #{self._turn_count} - nudging AI (attempt {self._empty_turn_nudge_count})")
+                            logger.warning(f"[{self.call_uuid[:8]}] STEP:EMPTY_TURN | Turn #{self._turn_count} - no audio, nudging AI (attempt {self._empty_turn_nudge_count})")
                             asyncio.create_task(self._send_silence_nudge())
                     else:
                         self._empty_turn_nudge_count = 0  # Reset on successful audio
@@ -833,7 +833,7 @@ class PlivoGeminiSession:
                     self._current_turn_audio_chunks = 0
 
                 if sc.get("interrupted"):
-                    logger.info("AI was interrupted by user")
+                    logger.info(f"[{self.call_uuid[:8]}] STEP:INTERRUPTED | AI was interrupted by user")
                     if self.plivo_ws:
                         await self.plivo_ws.send_text(json.dumps({"event": "clearAudio", "stream_id": self.stream_id}))
 
@@ -842,7 +842,7 @@ class PlivoGeminiSession:
                     user_text = sc["inputTranscript"]
                     if user_text and user_text.strip():
                         self._last_user_speech_time = time.time()  # Track for latency
-                        logger.info(f"USER said: {user_text}")
+                        logger.info(f"[{self.call_uuid[:8]}] STEP:USER_TRANSCRIPT | {user_text}")
                         self._save_transcript("USER", user_text.strip())
                         # Store in conversation history for reconnect context (limit size to prevent latency)
                         self._conversation_history.append({"role": "user", "text": user_text.strip()})
@@ -850,7 +850,7 @@ class PlivoGeminiSession:
                             self._conversation_history = self._conversation_history[-self._max_history_size:]
                         # Track if user said goodbye
                         if self._is_goodbye_message(user_text):
-                            logger.info(f"USER said goodbye: {user_text[:50]}")
+                            logger.info(f"[{self.call_uuid[:8]}] STEP:USER_GOODBYE | {user_text[:50]}")
                             self.user_said_goodbye = True
                             # Check if both parties said goodbye
                             self._check_mutual_goodbye()
@@ -868,7 +868,7 @@ class PlivoGeminiSession:
                                 self._turn_start_time = time.time()
                                 self._agent_speaking = True
                                 self._user_speaking = False
-                                logger.info(f">>> AGENT speaking (turn #{self._turn_count + 1})")
+                                logger.info(f"[{self.call_uuid[:8]}] STEP:AGENT_SPEAKING >>> Agent started speaking (turn #{self._turn_count + 1})")
                             # Record AI audio (24kHz)
                             self._record_audio("AI", audio_bytes, 24000)
 
@@ -876,7 +876,7 @@ class PlivoGeminiSession:
                             if self._last_user_speech_time:
                                 latency_ms = (time.time() - self._last_user_speech_time) * 1000
                                 if latency_ms > LATENCY_THRESHOLD_MS:
-                                    logger.warning(f"SLOW: AI response took {latency_ms:.0f}ms")
+                                    logger.warning(f"[{self.call_uuid[:8]}] STEP:LATENCY_SLOW | AI response took {latency_ms:.0f}ms")
                                 self._last_user_speech_time = None  # Reset after first response
 
                             # During preload (no plivo_ws yet), always store audio
@@ -893,7 +893,7 @@ class PlivoGeminiSession:
                                     }))
                                     # Log first chunk sent to Plivo for this turn
                                     if self._current_turn_audio_chunks == 1:
-                                        logger.info(f"    -> PLIVO: sending agent audio")
+                                        logger.info(f"[{self.call_uuid[:8]}] STEP:AGENT_TO_PLIVO -> Sending agent audio to Plivo")
                                 except Exception as plivo_err:
                                     logger.error(f"Error sending audio to Plivo: {plivo_err} - continuing")
                         if p.get("text"):
@@ -918,7 +918,7 @@ class PlivoGeminiSession:
                                     self._conversation_history = self._conversation_history[-self._max_history_size:]
                                 # Track if agent said goodbye (don't end immediately - wait for user)
                                 if not self._closing_call and self._is_goodbye_message(ai_text):
-                                    logger.info(f"AGENT said goodbye: {ai_text[:50]}")
+                                    logger.info(f"[{self.call_uuid[:8]}] STEP:AGENT_GOODBYE_TEXT | {ai_text[:50]}")
                                     self.agent_said_goodbye = True
                                     # Check if both parties said goodbye
                                     self._check_mutual_goodbye()
@@ -947,7 +947,7 @@ class PlivoGeminiSession:
                     self._user_speaking = True
                     self._agent_speaking = False
                     self._user_speech_start_time = now
-                    logger.info(f"<<< USER speaking")
+                    logger.info(f"[{self.call_uuid[:8]}] STEP:USER_SPEAKING <<< User started speaking")
             self._last_user_audio_time = now
 
             # Record user audio (16kHz)
@@ -962,7 +962,7 @@ class PlivoGeminiSession:
                     chunks_sent += 1
                     # Log first chunk sent to Gemini for this user speech
                     if chunks_sent == 1 and self._user_speaking:
-                        logger.info(f"    -> GEMINI: sending user audio")
+                        logger.info(f"[{self.call_uuid[:8]}] STEP:USER_TO_GEMINI -> Sending user audio to Gemini")
                 except Exception as send_err:
                     logger.error(f"Error sending audio to Google: {send_err} - continuing")
                 self.inbuffer = self.inbuffer[self.BUFFER_SIZE:]
@@ -987,7 +987,7 @@ class PlivoGeminiSession:
             logger.debug(f"Session {self.call_uuid} already stopped, skipping")
             return
 
-        logger.info(f"Stopping session for {self.call_uuid}")
+        logger.info(f"[{self.call_uuid[:8]}] STEP:CALL_STOPPING | Stopping session")
         self.is_active = False
 
         # Cancel timeout task
@@ -1002,7 +1002,7 @@ class PlivoGeminiSession:
         duration = 0
         if self.call_start_time:
             duration = (datetime.now() - self.call_start_time).total_seconds()
-            logger.info(f"Call {self.call_uuid} duration: {duration:.1f} seconds")
+            logger.info(f"[{self.call_uuid[:8]}] STEP:CALL_DURATION | {duration:.1f} seconds")
             self._save_transcript("SYSTEM", f"Call duration: {duration:.1f}s")
 
         if self.goog_live_ws:
