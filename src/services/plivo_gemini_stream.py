@@ -641,9 +641,10 @@ class PlivoGeminiSession:
                 # Check if user already said goodbye
                 self._check_mutual_goodbye()
 
-                # Fallback: if user doesn't respond within 10 seconds, end anyway
+                # Fallback: if user doesn't respond within 30 seconds, end anyway
+                # Increased from 10s to give user more time to respond
                 if not self._closing_call:
-                    asyncio.create_task(self._fallback_hangup(10.0))
+                    asyncio.create_task(self._fallback_hangup(30.0))
                 return
 
             # Execute the tool with context for templates - graceful error handling
