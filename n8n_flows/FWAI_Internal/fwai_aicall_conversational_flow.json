@@ -1,0 +1,265 @@
+{
+  "name": "FWAI AI Call - Conversational Flow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "start-conversational-call",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "trigger-start-call",
+      "name": "Start Call Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "start-conversational-call"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://your-server.com/call/conversational",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  \"phoneNumber\": $json.body.phoneNumber,\n  \"contactName\": $json.body.contactName || \"Customer\",\n  \"n8nWebhookUrl\": \"https://your-n8n.com/webhook/transcript-receiver\",\n  \"callEndWebhookUrl\": \"https://your-n8n.com/webhook/call-ended\",\n  \"context\": {\n    \"customer_name\": $json.body.contactName || \"Customer\"\n  }\n}) }}",
+        "options": {}
+      },
+      "id": "start-conversational-call",
+      "name": "Start Conversational Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "respond-start",
+      "name": "Respond - Call Started",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "transcript-receiver",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "transcript-webhook",
+      "name": "Transcript Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 520],
+      "webhookId": "transcript-receiver"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "user-speech",
+              "leftValue": "={{ $json.body.role }}",
+              "rightValue": "user",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-user-speech",
+      "name": "Filter User Speech",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [460, 520]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Analyze user intent from transcript\nconst text = $input.first().json.body.text.toLowerCase();\nconst callId = $input.first().json.body.call_uuid;\n\n// Simple intent detection - customize based on your needs\nlet nextPhase = null;\nlet data = {};\n\n// Check for various intents\nif (text.includes('yes') || text.includes('great') || text.includes('good') || text.includes('loved it')) {\n  nextPhase = 'connection_liked';\n} else if (text.includes('okay') || text.includes('fine') || text.includes('alright')) {\n  nextPhase = 'connection_neutral';\n} else if (text.includes('no') || text.includes(\"don't remember\") || text.includes('not really')) {\n  nextPhase = 'connection_dislike';\n} else if (text.includes('bye') || text.includes('goodbye') || text.includes('talk later')) {\n  nextPhase = 'closing_cold';\n} else if (text.includes('busy') || text.includes('call later') || text.includes('not now')) {\n  nextPhase = 'objection_busy';\n} else if (text.includes('price') || text.includes('cost') || text.includes('how much')) {\n  nextPhase = 'objection_price';\n} else if (text.includes('youtube') || text.includes('free')) {\n  nextPhase = 'objection_youtube';\n}\n\n// Extract data from conversation\nif (text.includes('developer') || text.includes('engineer') || text.includes('analyst')) {\n  data.role = text;\n}\n\nreturn {\n  call_uuid: callId,\n  transcript: text,\n  detected_phase: nextPhase,\n  captured_data: data,\n  should_inject: nextPhase !== null\n};"
+      },
+      "id": "analyze-intent",
+      "name": "Analyze Intent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 520]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "should-inject",
+              "leftValue": "={{ $json.should_inject }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-inject",
+      "name": "Should Inject?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 520]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://your-server.com/call/inject/{{ $json.call_uuid }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  \"phase\": $json.detected_phase,\n  \"context\": \"\",\n  \"data\": $json.captured_data\n}) }}",
+        "options": {}
+      },
+      "id": "inject-phase",
+      "name": "Inject Phase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 460]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "call-ended",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "call-ended-webhook",
+      "name": "Call Ended Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 740],
+      "webhookId": "call-ended"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process call end - extract summary, lead type, etc.\nconst data = $input.first().json.body;\n\nreturn {\n  call_uuid: data.call_uuid,\n  caller_phone: data.caller_phone,\n  duration_seconds: data.duration_seconds,\n  transcript: data.transcript,\n  timestamp: data.timestamp,\n  // Add your lead classification logic here\n  lead_type: 'warm' // hot, warm, cold\n};"
+      },
+      "id": "process-call-end",
+      "name": "Process Call End",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 740]
+    }
+  ],
+  "connections": {
+    "Start Call Trigger": {
+      "main": [
+        [
+          {
+            "node": "Start Conversational Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Conversational Call": {
+      "main": [
+        [
+          {
+            "node": "Respond - Call Started",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transcript Webhook": {
+      "main": [
+        [
+          {
+            "node": "Filter User Speech",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter User Speech": {
+      "main": [
+        [
+          {
+            "node": "Analyze Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Intent": {
+      "main": [
+        [
+          {
+            "node": "Should Inject?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Inject?": {
+      "main": [
+        [
+          {
+            "node": "Inject Phase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Ended Webhook": {
+      "main": [
+        [
+          {
+            "node": "Process Call End",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "pinData": {},
+  "versionId": "1",
+  "triggerCount": 0,
+  "tags": [
+    {
+      "name": "FWAI",
+      "id": "1"
+    },
+    {
+      "name": "Voice AI",
+      "id": "2"
+    }
+  ]
+}
