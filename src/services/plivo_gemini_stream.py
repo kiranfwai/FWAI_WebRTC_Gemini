@@ -22,10 +22,15 @@ def get_vertex_ai_token():
         import google.auth
         from google.auth.transport.requests import Request
 
-        credentials, project = google.auth.default(
-            scopes=['https://www.googleapis.com/auth/cloud-platform']
-        )
+        # Multiple scopes for Vertex AI Gemini Live API
+        scopes = [
+            'https://www.googleapis.com/auth/cloud-platform',
+            'https://www.googleapis.com/auth/generative-language',
+            'https://www.googleapis.com/auth/generative-language.retriever',
+        ]
+        credentials, project = google.auth.default(scopes=scopes)
         credentials.refresh(Request())
+        logger.info(f"Got Vertex AI token for project: {project}")
         return credentials.token
     except Exception as e:
         logger.error(f"Failed to get Vertex AI token: {e}")
