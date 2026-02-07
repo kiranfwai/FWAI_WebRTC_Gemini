@@ -103,13 +103,14 @@ TOOL_DECLARATIONS = [
 ]
 
 class PlivoGeminiSession:
-    def __init__(self, call_uuid: str, caller_phone: str, prompt: str = None, context: dict = None, webhook_url: str = None):
+    def __init__(self, call_uuid: str, caller_phone: str, prompt: str = None, context: dict = None, webhook_url: str = None, transcript_webhook_url: str = None):
         self.call_uuid = call_uuid  # Internal UUID
         self.plivo_call_uuid = None  # Plivo's actual call UUID (set later)
         self.caller_phone = caller_phone
         self.prompt = prompt or DEFAULT_PROMPT  # Use passed prompt or default
         self.context = context or {}  # Context for templates (customer_name, course_name, etc.)
         self.webhook_url = webhook_url  # URL to call when call ends (for n8n integration)
+        self._transcript_webhook_url = transcript_webhook_url  # URL for real-time transcript (n8n state machine)
         self.plivo_ws = None  # Will be set when WebSocket connects
         self.goog_live_ws = None
         self.is_active = False
@@ -1031,6 +1032,8 @@ Rules:
                         self._save_transcript("USER", user_text.strip())
                         # Log to file in background thread (no latency impact)
                         self._log_conversation("user", user_text.strip())
+                        # Send to n8n webhook for state machine (non-blocking)
+                        asyncio.create_task(send_transcript_to_webhook(self, "user", user_text.strip()))
                         # Track if user said goodbye
                         if self._is_goodbye_message(user_text):
                             logger.info(f"[{self.call_uuid[:8]}] STEP:USER_GOODBYE | {user_text[:50]}")
@@ -1097,6 +1100,8 @@ Rules:
                                 self._save_transcript("AGENT", ai_text)
                                 # Log to file in background thread (no latency impact)
                                 self._log_conversation("model", ai_text)
+                                # Send to n8n webhook for state machine (non-blocking)
+                                asyncio.create_task(send_transcript_to_webhook(self, "agent", ai_text))
                                 # Track if agent said goodbye (don't end immediately - wait for user)
                                 if not self._closing_call and self._is_goodbye_message(ai_text):
                                     logger.info(f"[{self.call_uuid[:8]}] STEP:AGENT_GOODBYE_TEXT | {ai_text[:50]}")
@@ -1335,3 +1340,150 @@ async def remove_session(call_uuid: str):
     if call_uuid in _preloading_sessions:
         await _preloading_sessions[call_uuid].stop()
         del _preloading_sessions[call_uuid]
+
+
+# ==================== CONVERSATIONAL FLOW SUPPORT ====================
+
+async def inject_context_to_session(call_uuid: str, phase: str, additional_context: str = None, data: dict = None) -> bool:
+    """
+    Inject dynamic context/prompt into an ongoing call session.
+    Used by n8n to send phase-specific prompts based on conversation state.
+
+    Args:
+        call_uuid: The call ID
+        phase: The conversation phase (e.g., "connection_liked", "situation_role")
+        additional_context: Optional additional context string from n8n
+        data: Optional data dict with captured information (role, company, etc.)
+
+    Returns:
+        True if injection succeeded
+    """
+    from src.conversational_prompts import PHASE_PROMPTS
+
+    session = _sessions.get(call_uuid)
+    if not session or not session.goog_live_ws:
+        logger.warning(f"Cannot inject context - session {call_uuid} not found or not connected")
+        return False
+
+    # Get phase-specific prompt
+    phase_prompt = PHASE_PROMPTS.get(phase)
+    if not phase_prompt:
+        logger.warning(f"Unknown phase: {phase}")
+        return False
+
+    try:
+        # Build context-aware prompt
+        full_prompt = phase_prompt
+
+        # Replace placeholders with context values from session context
+        if session.context:
+            customer_name = session.context.get("customer_name", "")
+            if customer_name:
+                full_prompt = full_prompt.replace("[NAME]", customer_name)
+
+        # Add additional context from n8n if provided
+        if additional_context:
+            full_prompt = full_prompt + "\n" + additional_context
+
+        # Add captured data as context
+        if data:
+            data_summary = "\n[CAPTURED DATA: " + ", ".join(f"{k}={v}" for k, v in data.items() if v) + "]"
+            full_prompt = full_prompt + data_summary
+
+        # Send as system instruction update via text message
+        msg = {
+            "client_content": {
+                "turns": [{
+                    "role": "user",
+                    "parts": [{"text": f"[PHASE UPDATE: {phase}]\n{full_prompt}"}]
+                }],
+                "turn_complete": True
+            }
+        }
+        await session.goog_live_ws.send(json.dumps(msg))
+        logger.info(f"[{call_uuid[:8]}] STEP:PHASE_INJECT | Injected phase: {phase}")
+        session._save_transcript("SYSTEM", f"Phase: {phase}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error injecting context: {e}")
+        return False
+
+
+async def preload_session_conversational(
+    call_uuid: str,
+    caller_phone: str,
+    base_prompt: str = None,
+    initial_phase_prompt: str = None,
+    context: dict = None,
+    n8n_webhook_url: str = None,
+    call_end_webhook_url: str = None
+) -> bool:
+    """
+    Preload a session in conversational flow mode.
+    Uses minimal BASE_PROMPT and expects n8n to inject phase-specific prompts dynamically.
+
+    Args:
+        call_uuid: Unique call identifier
+        caller_phone: Caller's phone number
+        base_prompt: Base prompt for the AI (from conversational_prompts.py)
+        initial_phase_prompt: Opening phase prompt (already has [NAME] replaced)
+        context: Context dict with customer_name, etc.
+        n8n_webhook_url: URL to send real-time transcripts (for n8n state machine)
+        call_end_webhook_url: URL to call when call ends
+
+    Returns:
+        True if preload succeeded
+    """
+    from src.conversational_prompts import BASE_PROMPT
+
+    # Use provided prompts or defaults
+    if base_prompt is None:
+        base_prompt = BASE_PROMPT
+
+    # Build initial prompt: BASE + opening phase
+    initial_prompt = base_prompt
+    if initial_phase_prompt:
+        initial_prompt = initial_prompt + "\n\n" + initial_phase_prompt
+
+    # Create session with minimal prompt
+    session = PlivoGeminiSession(
+        call_uuid,
+        caller_phone,
+        prompt=initial_prompt,
+        context=context,
+        webhook_url=call_end_webhook_url,
+        transcript_webhook_url=n8n_webhook_url
+    )
+
+    _preloading_sessions[call_uuid] = session
+    success = await session.preload()
+    return success
+
+
+async def send_transcript_to_webhook(session, role: str, text: str):
+    """
+    Send real-time transcript to n8n for state machine processing.
+    Called when user speaks (for intent detection) or agent speaks (for tracking).
+    """
+    if not hasattr(session, '_transcript_webhook_url') or not session._transcript_webhook_url:
+        return
+
+    try:
+        import httpx
+
+        payload = {
+            "event": "transcript",
+            "call_uuid": session.call_uuid,
+            "role": role,  # "user" or "agent"
+            "text": text,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(session._transcript_webhook_url, json=payload)
+
+        logger.debug(f"Sent transcript to webhook: {role}: {text[:50]}...")
+
+    except Exception as e:
+        logger.error(f"Error sending transcript webhook: {e}")

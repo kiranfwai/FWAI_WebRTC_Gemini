@@ -614,6 +614,139 @@ async def plivo_hangup(request: Request):
     return JSONResponse(content={"status": "ok"})
 
 
+# ============= CONVERSATIONAL FLOW ENDPOINTS =============
+
+class InjectContextRequest(BaseModel):
+    """Request to inject dynamic context into an ongoing call"""
+    phase: str  # Current conversation phase
+    context: str  # Dynamic prompt/context to inject
+    data: Optional[dict] = None  # Any captured data (name, role, etc.)
+
+
+@app.post("/call/inject/{call_id}")
+async def inject_context(call_id: str, request: InjectContextRequest):
+    """
+    Inject dynamic context into an ongoing call.
+    Called by n8n to change conversation phase or add context.
+    """
+    from src.services.plivo_gemini_stream import inject_context_to_session
+
+    logger.info(f"[{call_id[:8]}] INJECT | Phase: {request.phase}")
+
+    success = await inject_context_to_session(
+        call_id,
+        request.phase,
+        additional_context=request.context,
+        data=request.data
+    )
+
+    if success:
+        return JSONResponse(content={
+            "success": True,
+            "call_id": call_id,
+            "phase": request.phase
+        })
+    else:
+        raise HTTPException(status_code=404, detail=f"Call {call_id} not found or not active")
+
+
+class ConversationalCallRequest(BaseModel):
+    """Request to start a conversational flow call"""
+    phoneNumber: str
+    contactName: str = "Customer"
+    n8nWebhookUrl: str  # URL where n8n receives user speech
+    callEndWebhookUrl: Optional[str] = None  # URL when call ends
+    context: Optional[dict] = None
+
+
+@app.post("/call/conversational")
+async def start_conversational_call(request: ConversationalCallRequest):
+    """
+    Start a call with conversational flow mode.
+    Uses minimal base prompt, n8n controls the conversation via webhooks.
+    """
+    from src.services.plivo_gemini_stream import preload_session_conversational
+    from src.conversational_prompts import BASE_PROMPT, PHASE_PROMPTS
+
+    logger.info(f"Starting conversational call to {request.phoneNumber}")
+
+    try:
+        import uuid
+        call_uuid = str(uuid.uuid4())
+
+        # Add customer_name to context
+        context = request.context or {}
+        context.setdefault("customer_name", request.contactName)
+        context["n8n_webhook_url"] = request.n8nWebhookUrl  # For sending transcripts
+        context["conversational_mode"] = True
+
+        # Store call data
+        _pending_call_data[call_uuid] = {
+            "phone": request.phoneNumber,
+            "prompt": BASE_PROMPT,  # Minimal base prompt
+            "context": context,
+            "webhookUrl": request.callEndWebhookUrl,
+            "n8nWebhookUrl": request.n8nWebhookUrl,
+            "conversational_mode": True
+        }
+
+        # Preload with base prompt + opening phase
+        opening_prompt = BASE_PROMPT + "\n\n" + PHASE_PROMPTS["opening"].replace("[NAME]", request.contactName)
+
+        await preload_session_conversational(
+            call_uuid,
+            request.phoneNumber,
+            base_prompt=BASE_PROMPT,
+            initial_phase_prompt=PHASE_PROMPTS["opening"].replace("[NAME]", request.contactName),
+            context=context,
+            n8n_webhook_url=request.n8nWebhookUrl,
+            call_end_webhook_url=request.callEndWebhookUrl
+        )
+
+        # Make the Plivo call
+        result = await plivo_adapter.make_call(
+            phone_number=request.phoneNumber,
+            caller_name=request.contactName
+        )
+
+        if result.get("success"):
+            plivo_uuid = result.get("call_uuid")
+            if plivo_uuid:
+                _plivo_to_internal_uuid[plivo_uuid] = call_uuid
+                _internal_to_plivo_uuid[call_uuid] = plivo_uuid
+
+                from src.services.plivo_gemini_stream import set_plivo_uuid
+                set_plivo_uuid(call_uuid, plivo_uuid)
+
+            return JSONResponse(content={
+                "success": True,
+                "call_uuid": call_uuid,
+                "plivo_uuid": plivo_uuid,
+                "mode": "conversational",
+                "message": f"Conversational call initiated to {request.phoneNumber}"
+            })
+        else:
+            raise HTTPException(status_code=400, detail=result.get("error"))
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting conversational call: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/call/phases")
+async def get_available_phases():
+    """Get list of available conversation phases for n8n"""
+    from src.conversational_prompts import PHASE_PROMPTS, QUALIFICATION_RULES, DATA_FIELDS
+
+    return JSONResponse(content={
+        "phases": list(PHASE_PROMPTS.keys()),
+        "qualification_rules": QUALIFICATION_RULES,
+        "data_fields": DATA_FIELDS
+    })
+
+
 if __name__ == "__main__":
     import uvicorn
 
